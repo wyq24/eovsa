@@ -489,8 +489,8 @@ if __name__ == "__main__":
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    known = ['GAIN', 'PHAS', 'SOLP']  # known calibration types (first 4 letters)
     t = Time.now()
+    known = ['GAIN', 'PHAS', 'SOLP']  # known calibration types (first 4 letters)
     skip = False
     if len(sys.argv) >= 2:
         try:

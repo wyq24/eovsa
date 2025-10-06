@@ -45,6 +45,8 @@
 #    so truncate output from get_goes() to equal lengths.
 #  2025-05-20  DG
 #    Updated cal_qual() to work with 16 antennas.
+#   2025-10-05 SY
+#    Added masking of unreasonably high values in pdata in allday_udb() to avoid colorbar scaling issues.
 #
 
 if __name__ == "__main__":
@@ -81,14 +83,14 @@ def get_goes_data(t=None,sat_num=None):
         # Got the data, now isolate the requested day
         good, = np.where(np.floor(goes_t.mjd) == np.floor(t.mjd))
         if len(good) != 0:
-            lent = len(goes_t.plot_date) 
+            lent = len(goes_t.plot_date)
             lend = len(lo)
             if lent != lend:
                 lmin = min(lent,lend)
                 goes_t.plot_date = goes_t.plot_date[:lmin]
                 lo = lo[:lmin]
             return goes_t.plot_date,lo
-                
+
     from sunpy.util.config import get_and_create_download_dir
     import shutil
     from astropy.io import fits
@@ -144,7 +146,7 @@ def get_goes_data(t=None,sat_num=None):
     except:
         print('GOES site unreachable?')
         return None, None
-        
+
 def allday_udb(t=None, doplot=True, goes_plot=True, savfig=False, savfits=False, gain_corr=True):
     if savfits:
         import xspfits #jmm, 2018-01-05
@@ -184,7 +186,12 @@ def allday_udb(t=None, doplot=True, goes_plot=True, savfig=False, savfits=False,
     fghz = out['fghz']
     bl2use = np.array([0,1,2,3,4,5,6,7,8,9,10])
     #bl2use = np.array([0,2,3,4,6,7,8,9,10])
-    pdata = np.nansum(np.nansum(np.abs(out['x'][bl2use,:]),1),0)  # Spectrogram to plot
+    pdata_allbl = np.nansum(np.abs(out['x'][bl2use,:]),1)
+    ## flagging baselines with unreasonably high values
+    for bidx, pdata_bl in enumerate(pdata_allbl):
+        if np.nanpercentile(pdata_bl,50)>1e3 or np.nanpercentile(pdata_bl,99.9)>5e5:
+            pdata_allbl[bidx,:] = 0.0
+    pdata = np.nansum(pdata_allbl,0)  # Spectrogram to plot
     if savfits:
         print("***************** PDATA OUTPUT *********")
         print(pdata.shape)
@@ -193,12 +200,13 @@ def allday_udb(t=None, doplot=True, goes_plot=True, savfig=False, savfits=False,
         import matplotlib.pylab as plt
         from matplotlib.dates import DateFormatter
         f, ax = plt.subplots(1,1,figsize=(14,5))
-        X = np.sort(pdata.flatten())   # Sorted, flattened array
+        # X = np.sort(pdata.flatten())   # Sorted, flattened array
         # Set any time gaps to nan
         tdif = out['time'][1:] - out['time'][:-1]
         bad, = np.where(tdif > 120./86400)  # Time gaps > 2 minutes
         pdata[:,bad] = 0
-        vmax = X[int(len(X)*0.85)]  # Clip at 15% of points
+        # vmax = X[int(len(X)*0.85)]  # Clip at 15% of points
+        vmax = np.nanpercentile(pdata,85)
         im = ax.pcolormesh(Time(out['time'],format='jd').plot_date,out['fghz'],pdata,vmax=vmax)
         plt.colorbar(im,ax=ax,label='Amplitude [arb. units]')
         ax.xaxis_date()
@@ -329,7 +337,7 @@ def cal_qual(t=None, savfig=True):
     import rstn
     from util import get_idbdir
     import socket
-    
+
     if t is None:
         t = Time.now()
     mjd = t.mjd
@@ -401,7 +409,7 @@ def cal_qual(t=None, savfig=True):
             ax[j,i].plot(np.clip(out['p'][i,j,int(nf/3.)]/tpfac,0,nf),linewidth=1)
             ax[j,i].plot(np.clip(out['p'][i,j,int(2*nf/3.)]/tpfac,0,nf),linewidth=1)
             ax[j,i].set_title('Ant '+str(i+1)+[' X Pol',' Y Pol'][j],fontsize=10)
-    for j in range(2): 
+    for j in range(2):
         ax[j,nant-1].imshow(fluximg,aspect='auto',origin='lower',vmax=np.max(s),vmin=0)
         ax[j,nant-1].set_title('RSTN Flux',fontsize=10)
     for i in range(nant-1):
@@ -429,7 +437,7 @@ def cal_qual(t=None, savfig=True):
             ax[j,i].plot(np.clip(np.real(out['a'][i,j,int(nf/3.)]/tpfac),0,nf),linewidth=1)
             ax[j,i].plot(np.clip(np.real(out['a'][i,j,int(2*nf/3.)]/tpfac),0,nf),linewidth=1)
             ax[j,i].set_title('Ant '+str(i+1)+[' X Pol',' Y Pol'][j],fontsize=10)
-    for j in range(2): 
+    for j in range(2):
         ax[j,nant-1].imshow(fluximg,aspect='auto',origin='lower',vmax=np.max(s),vmin=0)
         ax[j,nant-1].set_title('RSTN Flux',fontsize=10)
     for i in range(nant-1):
@@ -445,7 +453,7 @@ def cal_qual(t=None, savfig=True):
             plt.savefig('/tmp/'+date[:4]+'/QUAL_'+date+'XP.png')
             print('The .png file could not be created in the /common/webplots/flaremon/daily/ folder.')
             print('A copy was created in /tmp/.')
-    
+
 
 if __name__ == "__main__":
     ''' For non-interactive use, use a backend that does not require a display
