@@ -1332,6 +1332,7 @@ if __name__ == "__main__":
     ''' Run automatically via cron job, or at command line.
         Usage: python /common/python/current/calibration.py "2014-12-15 18:30"
         where the time string is optional.  If omitted, the current time is used.
+        Note: this code is run on dpp as a cron job. /bin/bash /home/user/test_svn/shell_scripts/tpcal.sh
         
         Check whether there is a new SOLPNTCAL available, and
         analyze it if so.

@@ -61,7 +61,7 @@ if __name__ == "__main__":
 
 
 import read_idb as ri
-from util import Time
+from util import Time, get_antlist_from_file
 import numpy as np
 import glob
 from goes import get_goes
@@ -184,8 +184,17 @@ def allday_udb(t=None, doplot=True, goes_plot=True, savfig=False, savfits=False,
         out = gc.apply_gain_corr(out)
     trange = Time(out['time'][[0,-1]], format = 'jd')
     fghz = out['fghz']
-    bl2use = np.array([0,1,2,3,4,5,6,7,8,9,10])
-    #bl2use = np.array([0,2,3,4,6,7,8,9,10])
+
+
+    try:
+        antlist = get_antlist_from_file(filename='/data1/workdir/default.antlist', key='solpntcal', as_index=True)
+        bl2use = np.array(antlist)-2 ## 1-based Antenna numbers to 0-based baseline numbers. bl 0 is ant 1-2
+        bl2use = bl2use[bl2use>=0]  # Just in case antlist includes antennas 1
+        print('Using baseline list from /data1/workdir/default.antlist', bl2use)
+    except:
+        bl2use = np.array([0,1,2,3,4,5,6,7,8,9,10 ,11,12,13])  # All baselines for 14 antennas
+        print('Using default baseline list. Issue with reading /data1/workdir/default.antlist?')
+        # bl2use = np.array([0,2,3,4,6,7,8,9,10])
     pdata_allbl = np.nansum(np.abs(out['x'][bl2use,:]),1)
     ## flagging baselines with unreasonably high values
     for bidx, pdata_bl in enumerate(pdata_allbl):

@@ -76,6 +76,7 @@ import StringUtil as su
 from numpy import pi, sqrt, array, mat, matrix, dot, where, ndarray
 import datetime as dt
 from time import gmtime
+import re
 #
 # Suppress spurious warnings from ERFA
 import warnings
@@ -1405,3 +1406,52 @@ def plot_sched_log(tail=None):
         plt.plot_date(pd_list, dur_list, '.')
     else:
         plt.plot_date(pd_list[-tail:], dur_list[-tail:], '.')
+
+
+def get_antlist_from_file(filename='default.antlist', key='sun', as_index=False):
+    """
+    Reads an antlist definition file (e.g., default.antlist)
+    and returns the antenna list string or expanded indices for the given key.
+
+    Parameters
+    ----------
+    filename : str, optional
+        Path to the antlist file.
+    key : str, optional
+        The name of the antenna list to retrieve (e.g., 'sun').
+    as_index : bool, optional
+        If True, returns a list of antenna indices (integers).
+        If False, returns the raw antenna list string.
+
+    Returns
+    -------
+    str or list[int] or None
+        The antenna list as a string (e.g., 'ant1 ant4-9 ant10-13')
+        or as a list of indices (e.g., [1,4,5,6,7,8,9,10,11,12,13]).
+        Returns None if the key is not found.
+    """
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Skip comments and empty lines
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == key:
+                antlist_str = ' '.join(parts[1:])
+                if not as_index:
+                    return antlist_str
+
+                # Convert to list of integer indices
+                indices = []
+                tokens = re.split(r'[,\s]+', antlist_str.strip())
+                for token in tokens:
+                    if '-' in token:
+                        start, end = re.findall(r'\d+', token)
+                        indices.extend(range(int(start), int(end) + 1))
+                    else:
+                        num = re.findall(r'\d+', token)
+                        if num:
+                            indices.append(int(num[0]))
+                return sorted(indices)
+    return None
