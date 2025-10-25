@@ -164,7 +164,7 @@ if __name__ == "__main__":
 
 import numpy as np
 import solpnt
-from util import Time, nearest_val_idx, lobe, ant_str2list, get_idbdir, common_val_idx
+from util import Time, nearest_val_idx, lobe, ant_str2list, get_idbdir, common_val_idx, get_antlist_from_file
 import struct, time, glob, sys, socket, os
 from disk_conv import *
 import dump_tsys
@@ -1423,7 +1423,14 @@ if __name__ == "__main__":
         print 'Ant  X-Feed  Y-Feed'
         print '---  ------  ------'
         ngood = 0.
-        nant = 7  # 2025-04-28  Only 7 antennas working
+        try:
+            antlist = get_antlist_from_file(filename='/home/user/default.antlist', key='solpntcal', as_index=True)
+            nant = len(antlist)
+            print 'Using',nant,'antennas from default.antlist file.'
+        except:
+            # nant = 7  # 2025-04-28  Only 7 antennas working
+            nant = 10  # 2025-10-14  Only 10 antennas working
+            print 'Using',nant,'antennas (default).'
         for ant in range(nant):
             if qual[0,ant]:
                 ngood += 1
