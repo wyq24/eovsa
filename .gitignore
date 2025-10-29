@@ -46,4 +46,4 @@ __pycache__/
 
 # IDE settings
 .settings/
-.get_X_data.py.swp
+*.swp

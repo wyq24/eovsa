@@ -1,4 +1,4 @@
-## summary how to use solpnt_x to do antenna pointing. 
+## Summary: how to use solpnt_x for antenna pointing.
 ## https://ovsa.njit.edu/wiki/index.php/Owen%27s_Notes#Update_Antenna_Pointing
 import solpnt_x as sx
 from util import Time

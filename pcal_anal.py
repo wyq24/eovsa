@@ -191,7 +191,7 @@ def graph(f,navg=None,path=None):
         path = ''
 
     out = ri.read_idb(f,navg=navg)
-    if not out or 'fghz' not in out or len(out['fghz']) == 0:
+    if out is None or not isinstance(out, dict) or 'fghz' not in out or len(out['fghz']) == 0:
         # This file is no good, so skip it
         return
     if out['time'][0] < Time('2025-05-22').jd:
