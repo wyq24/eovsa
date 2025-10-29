@@ -128,6 +128,9 @@ def findfile(trange):
         good, = np.where(fdb['ST_SEC'][scanidx[sidx]] != '0')
         tslist = tslist[good]
         telist = telist[good]
+        scans = scans[good]
+        sidx = sidx[good]
+        eidx = eidx[good]
     except KeyError:
         # Key 'ST_SEC' not found so just continue (this happens on pipeline when IFDB file is used)
         pass
@@ -188,7 +191,7 @@ def graph(f,navg=None,path=None):
         path = ''
 
     out = ri.read_idb(f,navg=navg)
-    if len(out['fghz']) == 0:
+    if not out or 'fghz' not in out or len(out['fghz']) == 0:
         # This file is no good, so skip it
         return
     if out['time'][0] < Time('2025-05-22').jd:
