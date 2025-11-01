@@ -9,127 +9,22 @@ if __name__ == "__main__":
     print(user_paths)
 
 import argparse
+import os
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import numpy as np
+import numpy.ma as ma
 # from astropy.time import Time
 import pipeline_cal as pc
 from util import Time
 from glob import glob
 import shutil
-import dbutil
-
-
-import numpy as np
-
-# def annotate_observing_intervals(
-#         ax,
-#         SOS,                  # 1D array-like of start times in Matplotlib date numbers
-#         EOS,                  # 1D array-like of end times in Matplotlib date numbers, same length as SOS
-#         projects,             # 1D array-like of project strings, same length as SOS
-#         x_end=None,           # optional float: final EOS (mpl date). If None, uses ax.get_xlim()[1].
-#         lw_vline=0.5,
-#         color_start='g',
-#         color_end='r',
-#         end_linestyle='--',
-#         color_span_sun='#aaffaa',
-#         color_span_cal='#aaaaff',
-#         color_span_other='#ffaaaa',
-#         span_lw=2,
-#         label_color='#ff7f0e',
-#         fontsize=8):
-#     """
-#     Annotate a Matplotlib Axes with observing intervals using precomputed inputs.
-#
-#     Notes
-#     -----
-#     - EOS is constructed as roll(-1) of SOS; last EOS defaults to x_end
-#       (or ax.get_xlim()[1] if x_end is None).
-#     - Adds a clear end marker at the final EOS.
-#     """
-#     artists = {'start_vlines': [], 'end_vlines': [], 'spans': [], 'labels': [], 'final_end': []}
-#
-#
-#     nscans = len(SOS)
-#     if nscans == 0:
-#         return artists
-#
-#     print(Time(SOS, format='plot_date').iso, projects)
-#
-#     # Cache y-limits once
-#     y0, y1 = ax.get_ylim()
-#
-#     # Start markers
-#     start_lines = ax.vlines(SOS, y0, y1, colors=color_start, linewidth=lw_vline)
-#     artists['start_vlines'].append(start_lines)
-#
-#     # End markers (including final)
-#     end_lines = ax.vlines(EOS, y0, y1, colors=color_end, linestyles=end_linestyle, linewidth=lw_vline)
-#     artists['end_vlines'].append(end_lines)
-#
-#     # Final end emphasis (optional but clearer)
-#     final_line = ax.vlines([EOS[-1]], y0, y1, colors=color_end, linestyles=end_linestyle, linewidth=lw_vline+0.5)
-#     artists['final_end'].append(final_line)
-#     ax.text(EOS[-1], y1*0.99, 'END', color=color_end, fontsize=fontsize, ha='right', va='top', clip_on=True)
-#
-#     # Normalize project names (remove spaces, upper)
-#     norm = np.char.upper(np.char.replace(projects.astype(str), ' ', ''))
-#
-#     is_sun  = (norm == 'NORMALOBSERVING')
-#     is_idle = (norm == 'NONE')
-#     prefixes = np.char.array([s[:4] for s in norm])
-#     is_cal  = (prefixes == 'GAIN') | (prefixes == 'PHAS') | (prefixes == 'SOLP') | (norm == 'SOLPNTCAL')
-#     is_other = ~(is_sun | is_idle | is_cal)
-#
-#     # Span y-positions
-#     y_sun, y_cal, y_other = y1*0.93, y1*0.95, y1*0.97
-#
-#     def _plot_spans(mask, y_val, color):
-#         if not np.any(mask):
-#             return
-#         xs = np.vstack((SOS[mask], EOS[mask])).T
-#         for xpair in xs:
-#             ln = ax.plot_date(xpair, [y_val, y_val], ls='-', marker='None',
-#                               color=color, lw=span_lw, solid_capstyle='butt')
-#             artists['spans'].extend(ln)
-#
-#     _plot_spans(is_sun,   y_sun,   color_span_sun)
-#     _plot_spans(is_cal,   y_cal,   color_span_cal)
-#     _plot_spans(is_other, y_other, color_span_other)
-#
-#     # Text labels at SOS
-#     for i in range(nscans):
-#         x = SOS[i]
-#         if is_sun[i]:
-#             label, ytxt = 'SUN',  y1*0.935
-#         elif is_idle[i]:
-#             label, ytxt = 'IDLE', y1*0.975
-#         elif is_cal[i]:
-#             if norm[i].startswith('GAIN'):
-#                 label = 'GCAL'
-#             elif norm[i] == 'SOLPNTCAL':
-#                 label = 'TPCAL'
-#             elif norm[i].startswith('PHAS'):
-#                 label = 'PCAL'
-#             else:
-#                 label = 'CAL'
-#             ytxt = y1*0.955
-#         else:
-#             label, ytxt = projects[i], y1*0.975
-#
-#         txt = ax.text(x, ytxt, label, fontsize=fontsize, color=label_color,
-#                       clip_on=True, ha='left', va='top')
-#         artists['labels'].append(txt)
-#
-#     # Preserve original y-limits
-#     ax.set_ylim(y0, y1)
-#     return artists
-
-
-import numpy as np
+import dbutil as db
 import matplotlib.patheffects as pe
-import numpy.ma as ma
+
+
+
 
 def annotate_observing_intervals(
         ax,
@@ -270,15 +165,15 @@ def get_projects(t):
     # timerange is 12 UT to 12 UT on next day, relative to the day in Time() object t
     trange = Time([int(t.mjd) + 11. / 24, int(t.mjd) + 37. / 24], format='mjd')
     tstart, tend = trange.lv.astype('str')
-    cursor = dbutil.get_cursor()
+    cursor = db.get_cursor()
     mjd = t.mjd
     # Get the project IDs for scans during the period
-    verstrh = dbutil.find_table_version(cursor, trange[0].lv, True)
+    verstrh = db.find_table_version(cursor, trange[0].lv, True)
     if verstrh is None:
         print('No scan_header table found for given time.')
         return {}
     query = 'select Timestamp,Project from hV' + verstrh + '_vD1 where Timestamp between ' + tstart + ' and ' + tend + ' order by Timestamp'
-    projdict, msg = dbutil.do_query(cursor, query)
+    projdict, msg = db.do_query(cursor, query)
     if msg != 'Success':
         print(msg)
         return {}
@@ -465,135 +360,240 @@ def adjust_eos_per_antenna(t_plot, req_el_1d, SOS, EOS0,
 
 
 
-def plot_elevation_tracks(trange, savefig=False, outdir="/common/webplots/ant_track", showplt=False):
+def plot_pointing_tracks(trange, savefig=False, outdir="/common/webplots/ant_track",
+                         showplt=False, coord='el'):
     """
-    Fetch az/el info for given datetime range (UTC) and plot
-    Requested vs Actual Elevation for each antenna in a 4x4 grid.
-    Last axis left empty for common legend.
+    Fetch az/el info for given datetime range (UTC) and produce tracking figures.
+
+    Parameters
+    ----------
+    trange : sequence of datetime
+    savefig : bool
+    outdir : str
+    showplt : bool
+    coord : str or iterable of str
+        Coordinate keys to plot. Supported keys: 'el', 'az', 'fa'. Provide multiple
+        keys to generate several figures from a single SQL query.
     """
 
-    # Example: load data for the desired time window
-    # t = Time.now()
+    if isinstance(coord, str):
+        coord_keys = [coord]
+    else:
+        coord_keys = list(coord)
+    if not coord_keys:
+        raise ValueError("coord must include at least one key.")
+    coord_keys = [str(c).lower() for c in coord_keys]
+    supported_keys = {'el', 'az', 'fa'}
+    invalid = [c for c in coord_keys if c not in supported_keys]
+    if invalid:
+        raise ValueError("Unsupported coord keys {}. Use subset of {}.".format(invalid, sorted(supported_keys)))
+    seen = set()
+    coord_keys = [c for c in coord_keys if not (c in seen or seen.add(c))]
 
+    coord_config = {
+        'el': {
+            'requested_key': 'RequestedElevation',
+            'actual_key': 'ActualElevation',
+            'ylabel': 'Elevation [deg]',
+            'special_ylabel': 'Declination [deg]',
+            'req_label': 'Req El',
+            'act_label': 'Act El',
+            'special_req_label': 'Req Dec',
+            'special_act_label': 'Act Dec',
+            'ylim': (0, 90),
+            'title': 'Elevation'
+        },
+        'az': {
+            'requested_key': 'RequestedAzimuth',
+            'actual_key': 'ActualAzimuth',
+            'ylabel': 'Azimuth [deg]',
+            'special_ylabel': 'Hour Angle [deg]',
+            'req_label': 'Req Az',
+            'act_label': 'Act Az',
+            'special_req_label': 'Req HA',
+            'special_act_label': 'Act HA',
+            'ylim': (0, 360),
+            'title': 'Azimuth'
+        }
+    }
 
     data_trange = Time(trange)
     azeldict = pc.get_sql_info(data_trange)
 
     projdict = get_projects(data_trange[0]) or {}
-    # Extract time and flag
     time = azeldict['Time']
-    trackflag = azeldict['TrackFlag']
-
-    # Convert to datetime for matplotlib
     t_datetime = time.datetime
+    t_plot = time.plot_date
+    nt, nant = azeldict['ActualElevation'].shape
 
-    # plt.show()
-    # azeldict.keys()
-    # dict_keys(['dElevation', 'ActualAzimuth', 'RFSwitch', 'TrackFlag', 'RequestedElevation', 'dAzimuth', 'Receiver', 'ParallacticAngle', 'RequestedAzimuth', 'Time', 'ActualElevation', 'TrackSrcFlag', 'LF_Rcvr'])
-
-    nt, nant = azeldict['ActualAzimuth'].shape
-
-
+    SOS = EOS0 = None
     if projdict and 'Timestamp' in projdict:
         timestamp = Time(projdict['Timestamp'], format='lv')
         tidxs = np.where(timestamp <= data_trange[1])[0]
         if len(tidxs) >= 0:
             for k, v in projdict.items():
                 projdict[k] = v[tidxs]
-        SOS = Time(projdict['Timestamp'], format='lv').plot_date  # start-of-scan times
-        projects = projdict['Project']
+        SOS = Time(projdict['Timestamp'], format='lv').plot_date
         SOS = np.asarray(SOS, dtype=float)
         EOS0 = np.roll(SOS, -1)
-        EOS0[-1] = data_trange[1].plot_date  # end-of-s
-        projects = np.asarray(projects)
+        EOS0[-1] = data_trange[1].plot_date
+        projects = np.asarray(projdict['Project'])
         print(Time(projdict['Timestamp'], format='lv').iso, projects)
     else:
         projects = None
 
-    fig, axs = plt.subplots(figsize=(18, 9), ncols=4, nrows=4, sharex=True, sharey=True)
-    axs = axs.flatten()
-    t_plot = time.plot_date
-    # Per-antenna EOS adjustments
-    EOS_by_ant = np.zeros((len(SOS), nant), dtype=float)
-    for aidx in range(nant-1):
-        ax = axs[aidx]
-        ax.cla()
-        ax.set_ylim(0, 90)
-        if aidx % 4 == 0:
-            ax.set_ylabel('Elevation [deg]')
-        if aidx >= 12:
-            ax.set_xlabel('Time [UT]')
-        if projects is not None:
-            req_el_1d = azeldict['RequestedElevation'][:, aidx]
-            # EOS_adj = adjust_eos_per_antenna(t_plot, req_el_1d, SOS, EOS0,
-            #                                  step_deg=3.0, flat_eps=0.2, flat_n=50)
-            EOS_adj = adjust_eos_per_antenna(t_plot, req_el_1d, SOS, EOS0)
-            EOS_by_ant[:, aidx] = EOS_adj
-            gm = np.zeros_like(t_plot, dtype=bool)
-            for n in range(len(SOS)):
-                left = SOS[n]
-                right = EOS_by_ant[n, aidx]
-                # inclusive on both ends
-                gm |= (t_plot >= left) & (t_plot <= right)
-            # copy to avoid mutating originals
-            req = ma.masked_array(azeldict['RequestedElevation'][:, aidx].astype(float), mask=~gm)
-            act = ma.masked_array(azeldict['ActualElevation'][:, aidx].astype(float), mask=~gm)
-            annotate_observing_intervals(ax, SOS, EOS_adj, projects)
-        else:
-            req = azeldict['RequestedElevation'][:, aidx]
-            act = azeldict['ActualElevation'][:, aidx]
-        ax.plot(t_datetime, req, label='Req El', linestyle='-',c='#7f7f7f', lw=5)
-        ax.plot(t_datetime, act, label='Act El', linestyle='none',c='C1', marker='o', markersize=1)
-        ax.set_title('Ant {}'.format(aidx + 1))
-        ax.grid(False)
-        ax.set_ylim(0, 90)
-    ax = axs[-1]
-    ax.plot([], [], label='Requested Elevation', linestyle='-',c='#7f7f7f', lw=5)
-    ax.plot([], [], label='Actual Elevation', linestyle='none',c='C1',
-            marker='o', markersize=1)
-    ax.axis('off')
-    ax.legend(loc='center')
+    annotation_eos_by_ant = None
+    if projects is not None and SOS is not None:
+        az_key = 'RequestedAzimuth'
+        if az_key in azeldict:
+            annotation_eos_by_ant = np.zeros((len(SOS), nant), dtype=float)
+            req_az_full = np.asarray(azeldict[az_key], dtype=float)
+            for aidx in range(nant):
+                req_series = req_az_full[:, aidx]
+                annotation_eos_by_ant[:, aidx] = adjust_eos_per_antenna(
+                    t_plot, req_series, SOS, EOS0)
 
-    time_fmt = DateFormatter("%H:%M")
-    ax.xaxis.set_major_formatter(time_fmt)
-    # fig.suptitle('Requested vs Actual Elevation by Antenna')
-    fig.autofmt_xdate()
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.suptitle('Antenna Tracking Monitor for {}'.format(trange[0].strftime('%Y-%m-%d')), y=0.995)
+    ant16_idx = 15 if nant > 15 else (nant - 1)
+    figures = []
+
+    save_dir = outdir
+    datestamp = None
     if savefig:
         if trange[1].hour < 7:
-            # Data time is earlier than 7 UT (i.e. on previous local day) so
-            # use previous date at 20 UT.
             datelocal = trange[1].date() - timedelta(days=1)
         else:
             datelocal = trange[1].date()
         if datelocal.year < datetime.now().year:
-            outdir = os.path.join(outdir,datelocal.strftime('%Y'))
-            if not os.path.exists(outdir):
-                os.makedirs(outdir)
-        figname = '{}/track_{}.jpg'.format(outdir, datelocal.strftime('%Y%m%d'))
+            save_dir = os.path.join(outdir, datelocal.strftime('%Y'))
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        datestamp = datelocal.strftime('%Y%m%d')
+
+    def _save_plot(fig, coord_tag):
+        if not savefig:
+            return
+        figname = "{}/track_{}_{}.jpg".format(save_dir, coord_tag, datestamp)
         fig.savefig(figname, dpi=100, bbox_inches='tight')
         print("Wrote", figname)
-        figfiles = np.sort(glob('{}/track_20*'.format(outdir)))
-        shutil.copy(figfiles[-1], '{}/track_latest.jpg'.format(outdir))
+        figfiles = sorted(glob('{}/track_{}_20*'.format(save_dir, coord_tag)))
+        if figfiles:
+            shutil.copy(figfiles[-1], '{}/track_{}_latest.jpg'.format(save_dir, coord_tag))
+
+    for coord_key in coord_keys:
+        if coord_key in ('el', 'az'):
+            cfg = coord_config[coord_key]
+            fig, axs = plt.subplots(figsize=(18, 9), ncols=4, nrows=4, sharex=False, sharey=False)
+            figures.append(fig)
+            axs = axs.flatten()
+            ymin, ymax = cfg['ylim']
+            for aidx in range(nant):
+                ax = axs[aidx]
+                ax.cla()
+                ymin_cur, ymax_cur = ymin, ymax
+                if coord_key == 'az' and aidx == ant16_idx:
+                    ymin_cur, ymax_cur = -90, 90
+                ax.set_ylim(ymin_cur, ymax_cur)
+                if aidx % 4 == 0:
+                    ax.set_ylabel(cfg['ylabel'])
+                if aidx >= 12:
+                    ax.set_xlabel('Time [UT]')
+                if aidx == ant16_idx:
+                    ax.set_ylabel(cfg['special_ylabel'])
+                if projects is not None and SOS is not None and annotation_eos_by_ant is not None:
+                    eos_adj = annotation_eos_by_ant[:, aidx]
+                    gm = np.zeros_like(t_plot, dtype=bool)
+                    for n in range(len(SOS)):
+                        left = SOS[n]
+                        right = eos_adj[n]
+                        gm |= (t_plot >= left) & (t_plot <= right)
+                    req_data = azeldict[cfg['requested_key']][:, aidx].astype(float)
+                    act_data = azeldict[cfg['actual_key']][:, aidx].astype(float)
+                    req = ma.masked_array(req_data, mask=~gm)
+                    act = ma.masked_array(act_data, mask=~gm)
+                    annotate_observing_intervals(ax, SOS, eos_adj, projects)
+                if aidx == ant16_idx:
+                    ax.plot(t_datetime, req, label=cfg['special_req_label'], linestyle='-', c='#7f7f7f', lw=5)
+                    ax.plot(t_datetime, act, label=cfg['special_act_label'], linestyle='none', c='C1', marker='o', markersize=1)
+                else:
+                    ax.plot(t_datetime, req, label=cfg['req_label'], linestyle='-', c='#7f7f7f', lw=5)
+                    ax.plot(t_datetime, act, label=cfg['act_label'], linestyle='none', c='C1', marker='o', markersize=1)
+                ax.set_title('Ant {}'.format(aidx + 1))
+                ax.grid(False)
+                ax.set_ylim(ymin_cur, ymax_cur)
+                time_fmt = DateFormatter("%H:%M")
+                ax.xaxis.set_major_formatter(time_fmt)
+                if aidx >= nant - 2:
+                    ax.legend(loc='lower center')
+            fig.autofmt_xdate()
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            fig.suptitle('Antenna {} Tracking Monitor for {}'.format(cfg['title'], trange[0].strftime('%Y-%m-%d')), y=0.995)
+            _save_plot(fig, coord_key)
+        elif coord_key == 'fa':
+            if 'ParallacticAngle' not in azeldict:
+                raise KeyError("Azeldict missing 'ParallacticAngle' required for 'fa' plot.")
+            required_keys = ['AntA_Feed_Angle', 'AntA_Feed_Offset', 'AntA_Feed_Error']
+            missing = [k for k in required_keys if k not in azeldict]
+            if missing:
+                raise KeyError("Azeldict missing keys {} required for 'fa' plot.".format(missing))
+            fig, axs = plt.subplots(figsize=(18, 9), ncols=4, nrows=4, sharex=False, sharey=False)
+            figures.append(fig)
+            axs = axs.flatten()
+            feed_angle = -np.asarray(azeldict['AntA_Feed_Angle'], dtype=float)
+            feed_offset = np.asarray(azeldict['AntA_Feed_Offset'], dtype=float)
+            feed_error = np.asarray(azeldict['AntA_Feed_Error'], dtype=float)
+            par_angle = np.asarray(azeldict['ParallacticAngle'], dtype=float)
+            t_Anta_plt = azeldict['AntA_Time'].datetime
+            for aidx in range(nant):
+                ax = axs[aidx]
+                ax.cla()
+                ax.set_ylim(-180, 180)
+                if aidx % 4 == 0:
+                    ax.set_ylabel('Angle [deg]')
+                if aidx >= 12:
+                    ax.set_xlabel('Time [UT]')
+                ax.set_title('Ant {}'.format(aidx + 1))
+                if projects is not None and SOS is not None and annotation_eos_by_ant is not None:
+                    annotate_observing_intervals(ax, SOS, annotation_eos_by_ant[:, aidx], projects)
+                else:
+                    req = azeldict[cfg['requested_key']][:, aidx]
+                    act = azeldict[cfg['actual_key']][:, aidx]
+                if aidx == ant16_idx:
+                    ax.plot(t_Anta_plt, feed_angle, label='Pos Angle', linestyle='none', c='C1', marker='o', markersize=1)
+                    ax.plot(t_Anta_plt, feed_offset, label='Pos Off', linestyle='-', c='#7f7f7f', lw=5)
+                    ax.plot(t_Anta_plt, feed_error, label='Pos Err', linestyle='-', c="#dadada", lw=5)
+                else:
+                    ax.plot(t_datetime, par_angle[:, aidx], label='Par Ang', linestyle='none', c='C1', marker='o', markersize=1)
+                ax.grid(False)
+                time_fmt = DateFormatter("%H:%M")
+                ax.xaxis.set_major_formatter(time_fmt)
+                if aidx == ant16_idx or aidx >= nant - 2:
+                    ax.legend(loc='lower center')
+            fig.autofmt_xdate()
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            fig.suptitle('Antenna Feed Angle Monitor for {}'.format(trange[0].strftime('%Y-%m-%d')), y=0.995)
+            _save_plot(fig, coord_key)
 
     if showplt:
         plt.show()
+    else:
+        for fig in figures:
+            plt.close(fig)
 
 def main():
-    parser = argparse.ArgumentParser(description=("Plot Requested vs Actual Elevation per antenna "
+    parser = argparse.ArgumentParser(description=("Plot Requested vs Actual/Feed pointing per antenna "
                      "for 12:00-04:00 UT window. "
-                     "If --date omitted, uses yesterday (UTC) as base date.")
-    )
+                     "If --date omitted, uses yesterday (UTC) as base date."))
     parser.add_argument('--date', type=str, default=None,
                         help='Base date in YYYY-MM-DD (UTC)')
     parser.add_argument('--showplt', action='store_true', help='show plot instead of saving')
     parser.add_argument('--outdir', type=str, default='/common/webplots/ant_track', help='Output dir when using --save.')
+    parser.add_argument('--coord', nargs='+', default=['el', 'az', 'fa'], choices=['el', 'az', 'fa'],
+                        help="Coordinate keys to plot (default: el az). Include 'fa' for feed angle.")
     args = parser.parse_args()
 
     trange_dt = build_timerange_daily(args.date)
     print("Using time range (UTC):", trange_dt[0], "to", trange_dt[1])
-    plot_elevation_tracks(trange_dt, savefig=True, outdir=args.outdir, showplt=args.showplt)
+    plot_pointing_tracks(trange_dt, savefig=True, outdir=args.outdir, showplt=args.showplt, coord=args.coord)
 
 if __name__ == '__main__':
     main()

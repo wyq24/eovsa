@@ -140,6 +140,17 @@ def get_sql_info(trange):
     sqldict = db.get_dbrecs(cursor, dimension=1, timestamp=trange)
     azeldict.update({'RFSwitch':sqldict['FEMA_Powe_RFSwitchStatus']})
     azeldict.update({'LF_Rcvr':sqldict['FEMA_Rece_LoFreqEnabled']})
+    feed_angle = np.array(sqldict['FEMA_FRMS_Posi_Position'])
+    pos=np.where(np.abs(feed_angle)<1e-3)[0]
+    feed_angle[pos]=np.nan
+    azeldict.update({'AntA_Feed_Angle':feed_angle})
+    feed_pos_offset = np.array(sqldict['FEMA_FRMS_Posi_PositionOffset'])
+    pos = np.where(np.abs(feed_pos_offset) < 1e-3)[0]
+    feed_pos_offset[pos] = np.nan
+    azeldict.update({'AntA_Feed_Offset': feed_pos_offset})
+    feed_pos_error = np.array(sqldict['FEMA_FRMS_Posi_PositionError'])    
+    azeldict.update({'AntA_Feed_Error': feed_pos_error})
+    azeldict.update({'AntA_Time': Time(sqldict['Timestamp'].astype(int), format='lv')})
     if np.median(azeldict['RFSwitch']) == 0.0 and np.median(azeldict['LF_Rcvr']) == 1.0:
         azeldict.update({'Receiver':'Low'})
     elif np.median(azeldict['RFSwitch']) == 1.0 and np.median(azeldict['LF_Rcvr']) == 0.0:
