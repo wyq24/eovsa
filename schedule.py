@@ -449,6 +449,33 @@ import adc_cal2
 import pcapture2
 from whenup import make_sched, remove_cal
 
+
+class SimpleToolTip(object):
+    '''Lightweight tooltip helper for Tkinter widgets.'''
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self.widget.bind('<Enter>', self.show_tip)
+        self.widget.bind('<Leave>', self.hide_tip)
+
+    def show_tip(self, event=None):
+        if self.tipwindow or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 1
+        self.tipwindow = tw = Toplevel(self.widget)
+        tw.wm_overrideredirect(1)
+        tw.wm_geometry('+%d+%d' % (x, y))
+        label = Label(tw, text=self.text, justify=LEFT, background='#ffffe0',
+                      relief=SOLID, borderwidth=1, wraplength=280, font=('tahoma', '8', 'normal'))
+        label.pack(ipadx=4, ipady=2)
+
+    def hide_tip(self, event=None):
+        if self.tipwindow:
+            self.tipwindow.destroy()
+        self.tipwindow = None
+
 # Determine whether this is the master schedule (Subarray1) or controlling a second subarray
 # To run the master schedule, just type > python schedule.py
 #                                    or > python schedule.py Subarray1
@@ -816,6 +843,15 @@ class App():
                               variable=self.no27m)
         self.CB.pack(side=LEFT, expand=0, fill=BOTH)
 
+        self.skip_phacal = BooleanVar()
+        self.skip_phacal_btn = Checkbutton(timeframe, text="Skip Phacal",
+                                           variable=self.skip_phacal,
+                                           command=self.on_skip_phacal_toggle)
+        self.skip_phacal_btn.pack(side=LEFT, expand=0, fill=BOTH)
+        SimpleToolTip(self.skip_phacal_btn,
+                      'Skip midday ACQUIRE/PHASECAL pairs bracketed by Sun scans. '
+                      'Dawn/dusk refcals plus SOLPNTCAL and GAINSOLPNT remain unchanged.')
+
         self.menu = Menu(self.root)
 
         filemenu = Menu(self.menu, tearoff = 0)
@@ -898,6 +934,8 @@ class App():
         self.S2.pack(side = RIGHT, fill = BOTH)
         self.S2.config( command = self.L2.yview)
         self.L2.config( yscrollcommand = self.S2.set)
+
+        self.skip_phacal_indices = set()
 
         self.downbutton = Button(fmain, text = '- 1', command=self.Decrease_cmd)
         self.downbutton.pack(side=LEFT)
@@ -1040,6 +1078,180 @@ class App():
         #Definition for the scrollbar to control two windows and the same time.
         self.L.yview(*args)
         self.status.yview(*args)
+
+    #============================
+    def on_skip_phacal_toggle(self):
+        self._update_skip_phacal_indices()
+        if self.skip_phacal.get():
+            self._ensure_current_line_valid()
+            self._apply_skip_phacal_styling()
+        else:
+            now = mjd()
+            for idx in self.skip_phacal_indices:
+                if idx < getattr(self, 'lastline', 0) and idx < self.status.size():
+                    try:
+                        status = self.status.get(idx)
+                    except TclError:
+                        continue
+                    if status == 'Skipped':
+                        try:
+                            line = self.L.get(idx)
+                        except TclError:
+                            continue
+                        if mjd(line) > now:
+                            self.status.delete(idx)
+                            self.status.insert(idx,'Waiting...')
+            self._apply_skip_phacal_styling()
+
+    #============================
+    def _is_midday_phacal(self, idx):
+        '''Identify daytime PHASECAL lines that should be auto-skipped.'''
+        total = getattr(self, 'lastline', self.L.size())
+        if idx < 0 or idx >= total:
+            return False
+        try:
+            line = self.L.get(idx)
+        except TclError:
+            return False
+        tokens = line[20:].split()
+        if not tokens or tokens[0].upper() != 'PHASECAL':
+            return False
+        if idx == 0:
+            return False
+        # Require that the previous line is an ACQUIRE command
+        try:
+            prev_tokens = self.L.get(idx-1)[20:].split()
+        except TclError:
+            return False
+        if not prev_tokens or prev_tokens[0].upper() != 'ACQUIRE':
+            return False
+        try:
+            mjd_ph = mjd(line)
+        except Exception:
+            return False
+        ut_hours = (mjd_ph % 1) * 24.0
+        nominal_midday = [17. + 10./60., 22. + 10./60.]
+        # Allow up to 45 minutes deviation from nominal midday times
+        close_to_nominal = any(abs(ut_hours - t) <= 0.75 for t in nominal_midday)
+
+        # Require the pair to be bracketed by SUN commands
+        prev_sun_idx = None
+        for j in range(idx-2, -1, -1):
+            try:
+                prev_tokens = self.L.get(j)[20:].split()
+            except TclError:
+                continue
+            if prev_tokens and prev_tokens[0].upper() == 'SUN':
+                prev_sun_idx = j
+                break
+        if prev_sun_idx is None:
+            return False
+        # Require the next scheduled item to be SUN
+        for j in range(idx+1, total):
+            try:
+                next_tokens = self.L.get(j)[20:].split()
+            except TclError:
+                continue
+            if not next_tokens:
+                continue
+            if next_tokens[0].upper() == 'SUN':
+                return True
+            break
+        return close_to_nominal
+
+    #============================
+    def _update_skip_phacal_indices(self):
+        if not hasattr(self, 'L'):
+            self.skip_phacal_indices = set()
+            return
+        old_indices = getattr(self, 'skip_phacal_indices', set())
+        total = getattr(self, 'lastline', self.L.size())
+        new_indices = set()
+        for idx in range(total):
+            if self._is_midday_phacal(idx):
+                new_indices.add(idx)
+                if idx-1 >= 0:
+                    try:
+                        prev_tokens = self.L.get(idx-1)[20:].split()
+                    except TclError:
+                        prev_tokens = []
+                    if prev_tokens and prev_tokens[0].upper() == 'ACQUIRE':
+                        new_indices.add(idx-1)
+        # Clear highlights that no longer apply
+        for idx in old_indices - new_indices:
+            if idx < self.L.size():
+                try:
+                    if self.L.itemcget(idx, 'background') == 'light gray':
+                        self.L.itemconfig(idx, background='white')
+                    if idx < self.status.size():
+                        status = self.status.get(idx)
+                        if status == 'Skipped':
+                            line = self.L.get(idx)
+                            if mjd(line) > mjd():
+                                self.status.delete(idx)
+                                self.status.insert(idx,'Waiting...')
+                except TclError:
+                    pass
+        self.skip_phacal_indices = new_indices
+        self._apply_skip_phacal_styling()
+
+    #============================
+    def _apply_skip_phacal_styling(self):
+        if not hasattr(self, 'L'):
+            return
+        for idx in self.skip_phacal_indices:
+            if idx >= self.L.size():
+                continue
+            try:
+                if self.skip_phacal.get():
+                    if self.L.itemcget(idx, 'background') != 'orange':
+                        self.L.itemconfig(idx, background='light gray')
+                else:
+                    if self.L.itemcget(idx, 'background') == 'light gray':
+                        self.L.itemconfig(idx, background='white')
+            except TclError:
+                continue
+
+    #============================
+    def _mark_line_skipped(self, idx):
+        if idx >= getattr(self, 'lastline', 0):
+            return
+        if idx < self.status.size():
+            try:
+                if self.status.get(idx) != 'Skipped':
+                    self.status.delete(idx)
+                    self.status.insert(idx, 'Skipped')
+            except TclError:
+                pass
+        if idx < self.L.size():
+            try:
+                if self.L.itemcget(idx, 'background') != 'orange':
+                    self.L.itemconfig(idx, background='light gray')
+            except TclError:
+                pass
+
+    #============================
+    def _next_active_index(self, idx, mark=True):
+        next_idx = idx + 1
+        if not self.skip_phacal.get():
+            return next_idx
+        while next_idx < getattr(self, 'lastline', 0):
+            if next_idx in self.skip_phacal_indices:
+                if mark:
+                    self._mark_line_skipped(next_idx)
+                next_idx += 1
+            else:
+                break
+        return next_idx
+
+    #============================
+    def _ensure_current_line_valid(self):
+        if not self.skip_phacal.get() or not hasattr(self, 'curline'):
+            return
+        total = getattr(self, 'lastline', 0)
+        while self.curline < total and self.curline in self.skip_phacal_indices:
+            self._mark_line_skipped(self.curline)
+            self.curline += 1
 
     #============================
     def connect2roach(self):
@@ -1293,6 +1505,7 @@ class App():
         else:
             self.filename = filename
         # Update the status file in /common/webplots for display on the status web page
+        self._update_skip_phacal_indices()
         self.update_status()
         
     #============================
@@ -1313,6 +1526,7 @@ class App():
         self.lastline = len(scd)
         self.status.configure( state = DISABLED)
         self.filename = 'solar.scd'
+        self._update_skip_phacal_indices()
         
     #============================
     def Save(self):
@@ -1415,6 +1629,7 @@ class App():
                 self.L.delete(i)
                 self.L.insert(i,line)
             self.curline = 0
+        self._update_skip_phacal_indices()
 
     #============================
     def autogen(self,t):
@@ -1627,6 +1842,15 @@ class App():
             if self.curline == (self.lastline-1):
                 self.status.delete(self.curline)
                 self.status.insert(self.curline,'Started...')
+
+            if self.skip_phacal.get():
+                old_cur = self.curline
+                self._ensure_current_line_valid()
+                self._apply_skip_phacal_styling()
+                if self.curline != old_cur and self.curline < self.lastline:
+                    self.status.delete(self.curline)
+                    self.status.insert(self.curline,'Started...')
+                    self.L.itemconfig(self.curline,background="orange")
 
             # Find the file associated with the Macro command on the current 
             # line and fill in the L2 Listbox
@@ -2084,6 +2308,9 @@ class App():
         if self.Toggle == 0:
             # Schedule is in the GO state.
             # First check if the current line needs to be started or stopped
+            if self.skip_phacal.get():
+                self._apply_skip_phacal_styling()
+                self._ensure_current_line_valid()
             line = self.L.get(self.curline)
             status = self.status.get(self.curline)
             now = mjd()
@@ -2091,7 +2318,12 @@ class App():
                 # This line has not been started, so do so now
                 self.status.delete(self.curline)
                 self.status.insert(self.curline,'Running...')
-                self.L.itemconfig(max(self.curline-1,0),background="white")
+                prev_idx = self.curline-1
+                if prev_idx >= 0:
+                    if self.skip_phacal.get() and prev_idx in self.skip_phacal_indices:
+                        self.L.itemconfig(prev_idx,background="light gray")
+                    else:
+                        self.L.itemconfig(prev_idx,background="white")
                 self.L.itemconfig(self.curline,background="orange")
                 self.L.see(min(self.curline+5,END))
                 self.status.see(min(self.curline+5,END))
@@ -2111,23 +2343,33 @@ class App():
                     sys.stdout.flush()
                     if self.wait == 0:
                         self.execute_cmds()
-                nextline = self.L.get(self.curline+1)
-                if mjd(nextline) <= now:
+                next_idx = self._next_active_index(self.curline)
+                if next_idx < self.lastline:
+                    nextline = self.L.get(next_idx)
+                else:
+                    nextline = None
+                if nextline and mjd(nextline) <= now:
                     # Next line should be running
                     self.status.delete(self.curline)
                     self.status.insert(self.curline,'Done')
-                    self.curline += 1
-                    self.status.delete(self.curline)
-                    self.status.insert(self.curline,'Running...')
-                    self.L.itemconfig(self.curline-1,background="white")
-                    self.L.itemconfig(self.curline,background="orange")
-                    self.L.see(min(self.curline+5,END))
-                    self.status.see(min(self.curline+5,END))
+                    prev_cur = self.curline
+                    self.curline = next_idx
+                    if self.curline < self.lastline:
+                        self.status.delete(self.curline)
+                        self.status.insert(self.curline,'Running...')
+                        if self.skip_phacal.get() and prev_cur in self.skip_phacal_indices:
+                            self.L.itemconfig(prev_cur,background="light gray")
+                        else:
+                            self.L.itemconfig(prev_cur,background="white")
+                        self.L.itemconfig(self.curline,background="orange")
+                        self.L.see(min(self.curline+5,END))
+                        self.status.see(min(self.curline+5,END))
                     #******
                     # Change to spawn this task as non-blocking function
                     # but make sure it returns, or there is some semaphore
                     # behavior with error checking
-                    self.execute_cmds()
+                    if self.curline < self.lastline:
+                        self.execute_cmds()
                     #t1 = FuncThread(execute_cmds,self)
         self.status.configure(state=DISABLED)
         # Debug info, simply logs that we have exited this procedure
@@ -2332,7 +2574,11 @@ class App():
         self.update_status()
         # Get time range of this Macro command
         mjd1 = mjd(self.L.get(self.curline))
-        mjd2 = mjd(self.L.get(self.curline+1))
+        next_idx = self._next_active_index(self.curline, mark=False)
+        if self.lastline <= 0 or next_idx >= self.lastline:
+            mjd2 = mjd1
+        else:
+            mjd2 = mjd(self.L.get(next_idx))
         # Find the file associated with the Macro command on the current 
         # line and fill in the L2 Listbox
         line = self.L.get(self.curline)
