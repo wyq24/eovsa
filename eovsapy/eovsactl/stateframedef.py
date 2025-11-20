@@ -515,7 +515,7 @@ def drop_deftable(version):
     from . import dbutil as db
     cnxn, cursor = db.get_cursor()
     # Get all table and view names from this version
-    query = 'select * from information_schema.tables where table_name like "fV'+str(int(version))+'%"'
+    query = "select * from information_schema.tables where table_name like 'fV"+str(int(version))+"%'"
     result, msg = db.do_query(cursor, query)
     if msg == 'Success':
         names = result['TABLE_NAME']
@@ -703,4 +703,3 @@ def acc2sql():
                 print('Error: Incompatible version in stateframe.')
                 break
             time.sleep(1)
-

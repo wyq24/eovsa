@@ -1140,7 +1140,7 @@ def findscans(trange):
     tstart, tend = trange.lv.astype(int).astype(str)
     cnxn, cursor = dbutil.get_cursor()
     verstr = dbutil.find_table_version(cursor, tstart, True)
-    query = 'select Timestamp,Project,SourceID from hV'+verstr+'_vD1 where left(Project,8) = "PHASECAL" and Timestamp between '+tstart+' and '+tend+' order by Timestamp'
+    query = "select Timestamp,Project,SourceID from hV"+verstr+"_vD1 where left(Project,8) = 'PHASECAL' and Timestamp between "+tstart+' and '+tend+' order by Timestamp'
     projdict, msg = dbutil.do_query(cursor, query)
     cnxn.close()
     if msg != 'Success':

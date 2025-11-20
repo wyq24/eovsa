@@ -1878,7 +1878,7 @@ def dla_update2sql(dla_update, xy_delay=None, t=None, lorx=False):
         Updated to version 2 (16 antenna version)
     '''
     if dla_update[0] != 0.0:
-        print 'First delay in list is not zero.  Delays must be relative to Ant 1'
+        print('First delay in list is not zero.  Delays must be relative to Ant 1')
         return False
     if t is None:
         # If no time is defined, use the current time

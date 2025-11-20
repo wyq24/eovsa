@@ -569,9 +569,15 @@ def azel_from_sqldict(sqldict, antlist=None):
         antlist = range(nant)
 
     az1 = copy.deepcopy(sqldict['Ante_Cont_Azimuth1'].astype('float'))/10000.
-    az_corr = copy.deepcopy(sqldict['Ante_Cont_AzimuthPositionCorre'].astype('float'))/10000.
+    try:
+        az_corr = copy.deepcopy(sqldict['Ante_Cont_AzimuthPositionCorre'].astype('float'))/10000.
+    except:
+        az_corr = copy.deepcopy(sqldict['Ante_Cont_AzimuthPositionCorrected'].astype('float'))/10000.
     el1 = copy.deepcopy(sqldict['Ante_Cont_Elevation1'].astype('float'))/10000.
-    el_corr = copy.deepcopy(sqldict['Ante_Cont_ElevationPositionCor'].astype('float'))/10000.
+    try:
+        el_corr = copy.deepcopy(sqldict['Ante_Cont_ElevationPositionCor'].astype('float'))/10000.
+    except:
+        el_corr = copy.deepcopy(sqldict['Ante_Cont_ElevationPositionCorrected'].astype('float'))/10000.
     az_req = copy.deepcopy(sqldict['Ante_Cont_AzimuthPosition'].astype('float'))/10000.
     el_req = copy.deepcopy(sqldict['Ante_Cont_ElevationPosition'].astype('float'))/10000.
     # Use alternate source of requested positions where RunMode is 4

@@ -1,0 +1,685 @@
+#!/usr/bin/env python
+"""
+Expose a small subset of the live stateframe as JSON so Grafana (via the JSON API
+data source or any other HTTP client) can poll it.  The bridge reuses the existing
+stateframe utilities that power sf_display, so it does not change any control logic.
+
+Example:
+    $ python grafana_stateframe_bridge.py --port 9105 --poll-interval 2
+
+Once running, point Grafana's JSON API data source at:
+    http://<host>:9105/stateframe
+and configure panels to consume the returned fields.
+"""
+
+from __future__ import print_function
+
+import argparse
+import copy
+import glob
+import json
+import os
+import re
+import sys
+import threading
+import time
+from collections import deque
+
+import numpy as np
+
+import stateframe as stf
+from util import Time
+
+if sys.version_info[0] == 2:
+    import BaseHTTPServer
+
+    BaseHTTPRequestHandler = BaseHTTPServer.BaseHTTPRequestHandler
+    HTTPServer = BaseHTTPServer.HTTPServer
+    string_types = (basestring,)  # noqa: F821
+    import urllib2 as urllib_request  # type: ignore
+else:
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    string_types = (str,)
+    import urllib.request as urllib_request
+
+
+def _lv_to_unix_ms(lv_timestamp):
+    """Convert a LabVIEW timestamp to milliseconds since Unix epoch."""
+    try:
+        return int(Time(lv_timestamp, format='lv').unix * 1000.0)
+    except Exception:
+        return None
+
+
+def _assign_metric(metrics, name, value):
+    """Record numeric/boolean metrics, skipping values that are None."""
+    if value is None:
+        return
+    if isinstance(value, bool):
+        metrics[name] = 1 if value else 0
+        return
+    try:
+        metrics[name] = float(value)
+    except Exception:
+        pass
+
+
+def _parse_time_string(value, default=None):
+    """Return Unix ms from ISO8601 strings, numeric timestamps, or 'now-<offset>' expressions."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return int(float(value))
+    if isinstance(value, string_types):
+        token = value.strip()
+        if not token:
+            return default
+        if token == 'now':
+            return int(Time.now().unix * 1000.0)
+        if token.startswith('now-'):
+            try:
+                magnitude = float(token[4:-1])
+                unit = token[-1]
+                multiplier = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}.get(unit)
+                if multiplier is None:
+                    return default
+                seconds = magnitude * multiplier
+                return int((Time.now().unix - seconds) * 1000.0)
+            except Exception:
+                return default
+        try:
+            return int(Time(token).unix * 1000.0)
+        except Exception:
+            return default
+    return default
+
+
+def _safe_time(lv_timestamp):
+    """Convert a LabVIEW timestamp into ISO format if it is valid (> 0)."""
+    try:
+        if lv_timestamp and lv_timestamp > 0:
+            return Time(lv_timestamp, format='lv').iso
+    except Exception:
+        pass
+    return None
+
+
+class FlareMonitorReader(object):
+    """Tail flaretest files to expose the latest detector measurements."""
+
+    def __init__(self, root='/data1/eovsa/fits/FTST', lookback_days=3,
+                 base_url='https://ovsa.njit.edu/fits/FTST'):
+        self.root = os.environ.get('FLAREMON_ROOT', root)
+        self.base_url = os.environ.get('FLAREMON_URL', base_url).rstrip('/')
+        self.lookback_days = max(1, int(lookback_days))
+        self._current_file = None
+        self._current_meta = {}
+
+    def latest(self):
+        path = self._find_latest_file()
+        if path is None:
+            return {'error': 'No flaretest files found'}
+        if path != self._current_file:
+            self._current_meta = self._read_header(path)
+            self._current_file = path
+        sample = self._read_last_sample(path)
+        result = dict(self._current_meta)
+        result['file_path'] = path
+        if sample is None:
+            result.setdefault('error', 'No samples found in {}'.format(os.path.basename(path)))
+            return result
+        result.update(sample)
+        result.setdefault('error', None)
+        return result
+
+    def _find_latest_file(self):
+        files = []
+        now = Time.now()
+        if os.path.isdir(self.root):
+            for delta in range(self.lookback_days):
+                day = Time(now.mjd - delta, format='mjd').iso[:10]
+                files.extend(self._local_files_for_day(day))
+            if files:
+                try:
+                    return max(files, key=os.path.getmtime)
+                except Exception:
+                    return sorted(files)[-1]
+        # Local files not available-fall back to HTTP listing.
+        for delta in range(self.lookback_days):
+            day = Time(now.mjd - delta, format='mjd').iso[:10]
+            files.extend(self._remote_files_for_day(day))
+        return files[0] if files else None
+
+    def _local_files_for_day(self, datestr):
+        year = datestr[:4]
+        month = datestr[5:7]
+        day = datestr[8:10]
+        yymmdd = datestr[2:4] + month + day
+        pattern = os.path.join(self.root, year, month, 'flaretest_{}*.txt'.format(yymmdd))
+        return glob.glob(pattern)
+
+    def _remote_files_for_day(self, datestr):
+        if not self.base_url:
+            return []
+        year = datestr[:4]
+        month = datestr[5:7]
+        prefix = '{}/{}/{}/'.format(self.base_url, year, month)
+        url = prefix
+        try:
+            resp = urllib_request.urlopen(url, timeout=10)
+            body = resp.read()
+            try:
+                body = body.decode('utf-8', errors='ignore')
+            except AttributeError:
+                body = body
+        except Exception:
+            return []
+        matches = re.findall(r'flaretest_\d+\.txt', body)
+        unique = sorted(set(matches), reverse=True)
+        return ['{}{}'.format(prefix, name) for name in unique]
+
+    def _read_header(self, path):
+        meta = {
+            'source_id': None,
+            'project': None,
+            'scan_id': None,
+            'freq_band_ghz': None,
+            'avg_time_s': None,
+            'threshold_time_s': None,
+            'nsigmas': None,
+        }
+        try:
+            for line in self._iter_lines(path, max_lines=12):
+                clean = line.strip().replace('\x00', '')
+                if not clean:
+                    continue
+                lower = clean.lower()
+                if lower.startswith('date'):
+                    break
+                if clean.startswith('SOURCEID'):
+                    meta['source_id'] = clean.split(':', 1)[1].strip()
+                elif clean.startswith('PROJECT'):
+                    meta['project'] = clean.split(':', 1)[1].strip()
+                elif clean.startswith('SCANID'):
+                    meta['scan_id'] = clean.split(':', 1)[1].strip()
+                elif clean.startswith('FREQ BAND'):
+                    try:
+                        meta['freq_band_ghz'] = [float(val) for val in clean.split(':', 1)[1].split()]
+                    except Exception:
+                        meta['freq_band_ghz'] = None
+                elif clean.startswith('Avg. Time'):
+                    try:
+                        meta['avg_time_s'] = float(clean.split(':', 1)[1])
+                    except Exception:
+                        meta['avg_time_s'] = None
+                elif clean.startswith('Threshold Time'):
+                    try:
+                        meta['threshold_time_s'] = float(clean.split(':', 1)[1])
+                    except Exception:
+                        meta['threshold_time_s'] = None
+                elif clean.startswith('Nsigmas'):
+                    try:
+                        meta['nsigmas'] = float(clean.split()[-1])
+                    except Exception:
+                        meta['nsigmas'] = None
+        except Exception:
+            pass
+        return meta
+
+    def _read_last_sample(self, path):
+        last_line = None
+        try:
+            for line in self._iter_lines(path):
+                clean = line.strip().replace('\x00', '')
+                if not clean:
+                    continue
+                if clean[0].isdigit():
+                    last_line = clean
+        except Exception:
+            return None
+        if not last_line:
+            return None
+        parts = last_line.split()
+        if len(parts) < 10:
+            return None
+        date_str, time_str, flag = parts[:3]
+        detector_vals = []
+        for value in parts[3:6]:
+            try:
+                detector_vals.append(float(value))
+            except Exception:
+                detector_vals.append(None)
+        try:
+            mean_val = float(parts[6])
+        except Exception:
+            mean_val = None
+        try:
+            sigma_val = float(parts[7])
+        except Exception:
+            sigma_val = None
+        try:
+            threshold = float(parts[8])
+        except Exception:
+            threshold = None
+        try:
+            count = float(parts[9])
+        except Exception:
+            count = None
+        timestamp_iso, timestamp_ms = self._parse_datetime(date_str, time_str)
+        age_seconds = None
+        if timestamp_ms is not None:
+            age_seconds = max(0.0, Time.now().unix - (timestamp_ms / 1000.0))
+        return {
+            'timestamp_iso': timestamp_iso,
+            'timestamp_unix_ms': timestamp_ms,
+            'age_seconds': age_seconds,
+            'flag': flag,
+            'flag_active': flag.upper() not in ('F', '0', 'FALSE'),
+            'detectors': detector_vals,
+            'mean': mean_val,
+            'sigma': sigma_val,
+            'threshold': threshold,
+            'count': count
+        }
+
+    def _parse_datetime(self, datestr, timestr):
+        try:
+            year = datestr[:4]
+            month = datestr[4:6]
+            day = datestr[6:8]
+            hour = timestr[:2]
+            minute = timestr[2:4]
+            second = timestr[4:]
+            timestr_iso = '{}-{}-{} {}:{}:{}'.format(year, month, day, hour, minute, second)
+            t = Time(timestr_iso)
+            return t.iso, int(t.unix * 1000.0)
+        except Exception:
+            return None, None
+
+    def _iter_lines(self, path, max_lines=None):
+        """Yield text lines from local files or HTTP URLs."""
+        handle = None
+        try:
+            if path.startswith('http'):
+                handle = urllib_request.urlopen(path, timeout=10)
+                iterator = handle
+            else:
+                handle = open(path, 'r')
+                iterator = handle
+            count = 0
+            for raw in iterator:
+                if isinstance(raw, bytes):
+                    line = raw.decode('utf-8', errors='ignore')
+                else:
+                    line = raw
+                yield line
+                count += 1
+                if max_lines is not None and count >= max_lines:
+                    break
+        finally:
+            try:
+                if handle:
+                    handle.close()
+            except Exception:
+                pass
+
+
+class StateframeSampler(object):
+    """Continuously samples the ACC stateframe and keeps the latest and historical payloads."""
+
+    def __init__(self, poll_interval=1.0, antlist=None, history_seconds=3600, history_max_points=1800):
+        self.accini = stf.rd_ACCfile()
+        self.sf = self.accini['sf']
+        if antlist is None:
+            antlist = range(16)
+        self.antlist = antlist
+        self.poll_interval = poll_interval
+        self.history_seconds = history_seconds
+        self.history_max_points = history_max_points
+        self._lock = threading.Lock()
+        self._latest = {'error': 'Sampler not started'}
+        self._history = deque(maxlen=history_max_points if history_max_points else None)
+        self._metric_names = set()
+        self.flare_reader = FlareMonitorReader()
+        self._thread = threading.Thread(target=self._loop)
+        self._thread.daemon = True
+        self._thread.start()
+
+    @property
+    def history_window_ms(self):
+        return int(self.history_seconds * 1000.0)
+
+    def latest(self):
+        with self._lock:
+            return copy.deepcopy(self._latest)
+
+    def metric_names(self):
+        with self._lock:
+            return sorted(self._metric_names)
+
+    def history_series(self, metrics, start_ms=None, end_ms=None):
+        with self._lock:
+            samples = list(self._history)
+        result = {metric: [] for metric in metrics}
+        for sample in samples:
+            ts_ms = sample.get('timestamp_ms')
+            if ts_ms is None:
+                continue
+            if start_ms is not None and ts_ms < start_ms:
+                continue
+            if end_ms is not None and ts_ms > end_ms:
+                continue
+            metric_values = sample.get('metrics', {})
+            for metric in metrics:
+                value = metric_values.get(metric)
+                if value is None:
+                    continue
+                result[metric].append((value, ts_ms))
+        return result
+
+    def _loop(self):
+        while True:
+            data, msg = stf.get_stateframe(self.accini)
+            if msg == 'No Error':
+                payload = self._build_payload(data)
+            else:
+                payload = {
+                    'error': msg,
+                    'timestamp_iso': Time.now().iso
+                }
+            with self._lock:
+                self._latest = payload
+                if payload.get('error') is None:
+                    entry = self._prepare_history_entry(payload)
+                    if entry is not None:
+                        self._history.append(entry)
+                        self._metric_names.update(entry['metrics'].keys())
+            time.sleep(self.poll_interval)
+
+    def _build_payload(self, data):
+        sf = self.sf
+        payload = {}
+        sf_ts = stf.extract(data, sf['Timestamp'])
+        payload['stateframe_timestamp_lv'] = int(sf_ts)
+        payload['stateframe_time_iso'] = _safe_time(sf_ts)
+        payload['stateframe_time_unix_ms'] = _lv_to_unix_ms(sf_ts)
+
+        sched_ts = stf.extract(data, sf['Schedule']['Data']['Timestamp'])
+        payload['schedule_timestamp_lv'] = int(sched_ts)
+        payload['schedule_time_iso'] = _safe_time(sched_ts)
+        payload['schedule_time_unix_ms'] = _lv_to_unix_ms(sched_ts)
+
+        raw_task = stf.extract(data, sf['Schedule']['Task']).strip('\x00').replace('\t', ' ').replace('\r\n', '|')
+        task = raw_task
+        if task:
+            # Strip the trailing delimiter and the leading epoch stamp.
+            task = task[:-1]
+            parts = task.split()
+            task = ' '.join(parts[1:]) if len(parts) > 1 else ''
+        payload['task'] = task
+
+        payload['weather'] = self._weather_block(data)
+        payload['solar_power'] = self._solar_power_block(data, sf_ts)
+        payload['roach'] = self._roach_block(data)
+        payload['antennas'] = self._antenna_block(data)
+        payload['flare_monitor'] = self.flare_reader.latest()
+        payload['error'] = None
+        return payload
+
+    def _prepare_history_entry(self, payload):
+        timestamp_ms = payload.get('stateframe_time_unix_ms')
+        if timestamp_ms is None:
+            timestamp_ms = int(Time.now().unix * 1000.0)
+        metrics = self._flatten_metrics(payload)
+        return {
+            'timestamp_ms': timestamp_ms,
+            'metrics': metrics
+        }
+
+    def _flatten_metrics(self, payload):
+        metrics = {}
+        _assign_metric(metrics, 'stateframe.timestamp_ms', payload.get('stateframe_time_unix_ms'))
+        _assign_metric(metrics, 'schedule.timestamp_ms', payload.get('schedule_time_unix_ms'))
+
+        weather = payload.get('weather') or {}
+        _assign_metric(metrics, 'weather.wind_mph', weather.get('wind_mph'))
+        _assign_metric(metrics, 'weather.avg_wind_mph', weather.get('avg_wind_mph'))
+        _assign_metric(metrics, 'weather.wind_direction_deg', weather.get('wind_direction_deg'))
+        _assign_metric(metrics, 'weather.temperature_f', weather.get('temperature_f'))
+        _assign_metric(metrics, 'weather.pressure_mbar', weather.get('pressure_mbar'))
+
+        roach = payload.get('roach') or {}
+        _assign_metric(metrics, 'control_room.temperature_f', roach.get('control_room_temp_f'))
+
+        for entry in payload.get('solar_power', []):
+            suffix = 'array{:02d}'.format(entry.get('array'))
+            _assign_metric(metrics, 'solar.{}.charge_pct'.format(suffix), entry.get('charge_pct'))
+            _assign_metric(metrics, 'solar.{}.voltage_v'.format(suffix), entry.get('voltage_v'))
+            _assign_metric(metrics, 'solar.{}.current_a'.format(suffix), entry.get('current_a'))
+            _assign_metric(metrics, 'solar.{}.age_seconds'.format(suffix), entry.get('age_seconds'))
+
+        for antenna in payload.get('antennas', []):
+            prefix = 'antenna.{:02d}'.format(antenna.get('id'))
+            _assign_metric(metrics, '{}.az_actual_deg'.format(prefix), antenna.get('az_actual_deg'))
+            _assign_metric(metrics, '{}.az_requested_deg'.format(prefix), antenna.get('az_requested_deg'))
+            _assign_metric(metrics, '{}.el_actual_deg'.format(prefix), antenna.get('el_actual_deg'))
+            _assign_metric(metrics, '{}.el_requested_deg'.format(prefix), antenna.get('el_requested_deg'))
+            _assign_metric(metrics, '{}.delta_az_deg'.format(prefix), antenna.get('delta_az_deg'))
+            _assign_metric(metrics, '{}.delta_el_deg'.format(prefix), antenna.get('delta_el_deg'))
+            _assign_metric(metrics, '{}.parallactic_angle_deg'.format(prefix),
+                           antenna.get('parallactic_angle_deg'))
+            _assign_metric(metrics, '{}.tracking'.format(prefix), antenna.get('tracking'))
+            _assign_metric(metrics, '{}.track_source'.format(prefix), antenna.get('track_source'))
+
+        flare = payload.get('flare_monitor') or {}
+        detectors = flare.get('detectors') or []
+        _assign_metric(metrics, 'flare.timestamp_ms', flare.get('timestamp_unix_ms'))
+        _assign_metric(metrics, 'flare.flag_active', flare.get('flag_active'))
+        _assign_metric(metrics, 'flare.mean', flare.get('mean'))
+        _assign_metric(metrics, 'flare.sigma', flare.get('sigma'))
+        _assign_metric(metrics, 'flare.threshold', flare.get('threshold'))
+        _assign_metric(metrics, 'flare.count', flare.get('count'))
+        _assign_metric(metrics, 'flare.age_seconds', flare.get('age_seconds'))
+        for idx, value in enumerate(detectors, 1):
+            _assign_metric(metrics, 'flare.detector{:d}'.format(idx), value)
+
+        return metrics
+
+    def _weather_block(self, data):
+        weather = self.sf['Schedule']['Data']['Weather']
+        dtor = np.pi / 180.
+        wind = float(stf.extract(data, weather['Wind']))
+        avg_wind = float(stf.extract(data, weather['AvgWind']))
+        direction = stf.extract(data, weather['WindDirection']) / dtor
+        dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+        idir = int(np.fmod(direction + 22.5, 360.) / 45.)
+        return {
+            'wind_mph': wind,
+            'avg_wind_mph': avg_wind,
+            'wind_direction_deg': float(direction),
+            'wind_direction_cardinal': dirs[idir],
+            'temperature_f': float(stf.extract(data, weather['Temperature'])),
+            'pressure_mbar': float(stf.extract(data, weather['Pressure']))
+        }
+
+    def _solar_power_block(self, data, sf_timestamp):
+        now = Time(sf_timestamp, format='lv')
+        block = []
+        for idx, key in enumerate(self.sf['Schedule']['Data']['SolarPower']):
+            reading_ts = stf.extract(data, key['Timestamp'])
+            entry = {
+                'array': 12 if idx == 0 else 13,
+                'timestamp_lv': int(reading_ts),
+                'timestamp_iso': _safe_time(reading_ts),
+                'charge_pct': float(stf.extract(data, key['Charge'])),
+                'voltage_v': float(stf.extract(data, key['Volts'])),
+                'current_a': float(stf.extract(data, key['Amps']))
+            }
+            if entry['timestamp_iso']:
+                age = (now - Time(reading_ts, format='lv')).value * 86400.0
+                entry['age_seconds'] = float(age)
+            else:
+                entry['age_seconds'] = None
+            block.append(entry)
+        return block
+
+    def _roach_block(self, data):
+        # Map the ambient temperature into F, mirroring sf_display.
+        ambient_c = stf.extract(data, self.sf['Schedule']['Data']['Roach'][0]['Temp.ambient'])
+        temp_f = int(ambient_c * 90. / 5) / 10. + 32
+        return {'control_room_temp_f': float(temp_f)}
+
+    def _antenna_block(self, data):
+        stats = stf.azel_from_stateframe(self.sf, data, self.antlist)
+        antennas = []
+        for idx, ant in enumerate(self.antlist):
+            az_actual = float(stats['ActualAzimuth'][idx])
+            el_actual = float(stats['ActualElevation'][idx])
+            tracking = bool(stats['TrackFlag'][idx])
+            # If both axes are parked at zero, treat the antenna as not tracking.
+            if abs(az_actual) < 1e-6 and abs(el_actual) < 1e-6:
+                tracking = False
+            antennas.append({
+                'id': ant + 1,
+                'az_actual_deg': az_actual,
+                'az_requested_deg': float(stats['RequestedAzimuth'][idx]),
+                'el_actual_deg': el_actual,
+                'el_requested_deg': float(stats['RequestedElevation'][idx]),
+                'delta_az_deg': float(stats['dAzimuth'][idx]),
+                'delta_el_deg': float(stats['dElevation'][idx]),
+                'parallactic_angle_deg': float(stats['ParallacticAngle'][idx]),
+                'tracking': tracking,
+                'track_source': bool(stats['TrackSrcFlag'][idx])
+            })
+        return antennas
+
+
+SAMPLER = None
+
+
+class GrafanaRequestHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler providing /stateframe and /healthz endpoints."""
+
+    def log_message(self, fmt, *args):
+        # Silence default logging noise.
+        pass
+
+    def _send_json(self, payload, status=200):
+        body = json.dumps(payload)
+        if isinstance(body, bytes):
+            body_bytes = body
+        else:
+            body_bytes = body.encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', len(body_bytes))
+        self.end_headers()
+        self.wfile.write(body_bytes)
+
+    def do_GET(self):
+        if self.path in ('/', '/stateframe'):
+            payload = SAMPLER.latest()
+            self._send_json(payload)
+        elif self.path == '/healthz':
+            payload = SAMPLER.latest()
+            status = 200 if payload.get('error') in (None, 'Sampler not started') else 503
+            self._send_json({'status': payload.get('error') or 'ok'}, status=status)
+        else:
+            self._send_json({'error': 'unknown endpoint'}, status=404)
+
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length') or 0)
+        try:
+            body = self.rfile.read(length) if length else b''
+        except Exception:
+            self._send_json({'error': 'unable to read request body'}, status=400)
+            return
+        try:
+            payload = json.loads(body or '{}')
+        except Exception:
+            self._send_json({'error': 'invalid JSON body'}, status=400)
+            return
+
+        if self.path == '/search':
+            metrics = SAMPLER.metric_names()
+            self._send_json(metrics)
+            return
+
+        if self.path == '/query':
+            response = self._handle_query(payload)
+            self._send_json(response)
+            return
+
+        self._send_json({'error': 'unknown endpoint'}, status=404)
+
+    def _handle_query(self, payload):
+        now_ms = int(Time.now().unix * 1000.0)
+        range_dict = payload.get('range') or {}
+        start_ms = _parse_time_string(range_dict.get('from'))
+        end_ms = _parse_time_string(range_dict.get('to')) or now_ms
+        if start_ms is None:
+            raw_from = (payload.get('rangeRaw') or {}).get('from')
+            start_ms = _parse_time_string(raw_from, default=end_ms - SAMPLER.history_window_ms)
+        metrics = []
+        for target in payload.get('targets') or []:
+            if isinstance(target, dict):
+                name = target.get('target') or target.get('refId')
+            else:
+                name = target
+            if name:
+                metrics.append(name)
+        series = SAMPLER.history_series(metrics, start_ms=start_ms, end_ms=end_ms)
+        result = []
+        for metric, points in series.items():
+            datapoints = [[value, ts] for value, ts in points]
+            result.append({'target': metric, 'datapoints': datapoints})
+        return result
+
+
+def _parse_antennas(arg):
+    if not arg:
+        return None
+    ants = []
+    for item in arg.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        idx = int(item)
+        if idx < 1 or idx > 16:
+            raise ValueError('Antenna ids must be 1-16')
+        ants.append(idx - 1)
+    return ants
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Expose stateframe snippets for Grafana.')
+    parser.add_argument('--port', type=int, default=9105, help='HTTP port to listen on (default: 9105)')
+    parser.add_argument('--poll-interval', type=float, default=30.0,
+                        help='Seconds between ACC polls (default: 30)')
+    parser.add_argument('--antennas', default='', help='Comma-separated antenna IDs (1-16) to publish')
+    parser.add_argument('--history-seconds', type=float, default=86400,
+                        help='Approximate number of seconds of samples to keep in memory (default: 86400)')
+    parser.add_argument('--history-max-points', type=int, default=8640,
+                        help='Maximum number of samples to keep (default: 8640)')
+    args = parser.parse_args()
+
+    antlist = _parse_antennas(args.antennas)
+    global SAMPLER
+    SAMPLER = StateframeSampler(
+        poll_interval=args.poll_interval,
+        antlist=antlist,
+        history_seconds=args.history_seconds,
+        history_max_points=args.history_max_points)
+
+    server = HTTPServer(('', args.port), GrafanaRequestHandler)
+    print('Grafana bridge listening on port {}'.format(args.port))
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print('\nShutting down Grafana bridge.')
+        server.server_close()
+
+
+if __name__ == '__main__':
+    main()

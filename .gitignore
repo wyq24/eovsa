@@ -47,3 +47,6 @@ __pycache__/
 # IDE settings
 .settings/
 *.swp
+
+ovsa_site/*
+
