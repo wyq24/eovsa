@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from collections import deque
+import math
 
 import numpy as np
 
@@ -63,6 +64,18 @@ def _assign_metric(metrics, name, value):
         metrics[name] = float(value)
     except Exception:
         pass
+
+
+def _finite_or_none(value):
+    """Return a finite float for scalars/length-1 arrays; otherwise None."""
+    try:
+        arr = np.asarray(value, dtype=float)
+        if arr.size != 1:
+            return None
+        val = float(arr.reshape(-1)[0])
+        return val if np.isfinite(val) else None
+    except Exception:
+        return None
 
 
 def _parse_time_string(value, default=None):
@@ -467,10 +480,13 @@ class StateframeSampler(object):
             _assign_metric(metrics, '{}.el_requested_deg'.format(prefix), antenna.get('el_requested_deg'))
             _assign_metric(metrics, '{}.delta_az_deg'.format(prefix), antenna.get('delta_az_deg'))
             _assign_metric(metrics, '{}.delta_el_deg'.format(prefix), antenna.get('delta_el_deg'))
-            _assign_metric(metrics, '{}.parallactic_angle_deg'.format(prefix),
-                           antenna.get('parallactic_angle_deg'))
+            _assign_metric(metrics, '{}.parallactic_angle_deg'.format(prefix), antenna.get('parallactic_angle_deg'))
             _assign_metric(metrics, '{}.tracking'.format(prefix), antenna.get('tracking'))
             _assign_metric(metrics, '{}.track_source'.format(prefix), antenna.get('track_source'))
+            _assign_metric(metrics, '{}.fe.hpol_power_dbm'.format(prefix), antenna.get('fe_hpol_power_dbm'))
+            _assign_metric(metrics, '{}.fe.vpol_power_dbm'.format(prefix), antenna.get('fe_vpol_power_dbm'))
+            _assign_metric(metrics, '{}.be.hpol_voltage_v'.format(prefix), antenna.get('be_hpol_voltage_v'))
+            _assign_metric(metrics, '{}.be.vpol_voltage_v'.format(prefix), antenna.get('be_vpol_voltage_v'))
 
         flare = payload.get('flare_monitor') or {}
         detectors = flare.get('detectors') or []
@@ -540,6 +556,24 @@ class StateframeSampler(object):
             # If both axes are parked at zero, treat the antenna as not tracking.
             if abs(az_actual) < 1e-6 and abs(el_actual) < 1e-6:
                 tracking = False
+            fe = self.sf['Antenna'][ant]['Frontend']['FEM']
+            try:
+                fe_h_power = _finite_or_none(stf.extract(data, fe['HPol']['Power']))
+            except Exception:
+                fe_h_power = None
+            try:
+                fe_v_power = _finite_or_none(stf.extract(data, fe['VPol']['Power']))
+            except Exception:
+                fe_v_power = None
+            be = self.sf['DCM'][ant]
+            try:
+                be_h_voltage = _finite_or_none(stf.extract(data, be['HPol']['Voltage']))
+            except Exception:
+                be_h_voltage = None
+            try:
+                be_v_voltage = _finite_or_none(stf.extract(data, be['VPol']['Voltage']))
+            except Exception:
+                be_v_voltage = None
             antennas.append({
                 'id': ant + 1,
                 'az_actual_deg': az_actual,
@@ -550,7 +584,11 @@ class StateframeSampler(object):
                 'delta_el_deg': float(stats['dElevation'][idx]),
                 'parallactic_angle_deg': float(stats['ParallacticAngle'][idx]),
                 'tracking': tracking,
-                'track_source': bool(stats['TrackSrcFlag'][idx])
+                'track_source': bool(stats['TrackSrcFlag'][idx]),
+                'fe_hpol_power_dbm': fe_h_power,
+                'fe_vpol_power_dbm': fe_v_power,
+                'be_hpol_voltage_v': be_h_voltage,
+                'be_vpol_voltage_v': be_v_voltage
             })
         return antennas
 
