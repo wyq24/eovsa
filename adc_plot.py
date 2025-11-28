@@ -489,11 +489,16 @@ def adc_plot(fname,tplot=None):
                 break
     print 'File ended at time',t
 
-def adc2master_table(fname=None, time=None, navg=10, attnval=None):
+def adc2master_table(fname=None, time=None, navg=10, attnval=None, ant_str=None):
     ''' Reads the ADC measurements from a file in the /tmp folder and,
         given a fixed attenuation value analyzes the results and creates
         a master DCM table for calibrating the DCM attenuations.  Also
         asks the user to confirm before sending the table to SQL.
+
+        If ant_str is provided, it should be a standard antenna-selection
+        string (e.g., 'Ant1-5,8,10') and only those antennas will get
+        updated DCM values.  All other antennas will retain their current
+        DCM_master_table settings as read from the ACC.
     '''
     # Read standard deviations and produce a DCM master table
     if fname is None:
@@ -548,6 +553,33 @@ def adc2master_table(fname=None, time=None, navg=10, attnval=None):
         else:
             j = i+2
         new_table[j] = np.clip((np.round(attn14[:,i]+attnval)/2.).astype(int)*2,0,30)
+
+    # If a subset of antennas is requested, preserve the existing DCM
+    # values for all *other* antennas by reading the current ACC table.
+    if ant_str is not None:
+        try:
+            import cal_header
+            from util import ant_str2list
+            dcmdict = cal_header.ACC_DCMtable2dict()
+            if dcmdict and 'DCMattn' in dcmdict:
+                current_table = dcmdict['DCMattn']   # Shape (52, 32)
+                # Build list of antenna indices (0-based) to update
+                ants_to_update = ant_str2list(ant_str)
+                # Clamp list to the valid range 0-15
+                ants_to_update = [a for a in ants_to_update if 0 <= a < 16]
+                # For any antenna *not* in ants_to_update, restore the
+                # current_table values (both X and Y columns) into new_table.
+                all_ants = range(16)
+                ants_to_preserve = [a for a in all_ants if a not in ants_to_update]
+                for a in ants_to_preserve:
+                    ix = 2*a
+                    iy = ix+1
+                    new_table[:,ix] = current_table[:,ix]
+                    new_table[:,iy] = current_table[:,iy]
+        except:
+            # If anything goes wrong (e.g., cannot reach ACC), fall back
+            # to updating all antennas as before.
+            pass
     newtbl = []
     newtbl.append('#      Ant1  Ant2  Ant3  Ant4  Ant5  Ant6  Ant7  Ant8  Ant9 Ant10 Ant11 Ant12 Ant13 Ant14 Ant15 Ant16')
     newtbl.append('#      X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y  X  Y')
