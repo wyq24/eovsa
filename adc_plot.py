@@ -66,6 +66,8 @@
 #  2025-May-17  DG
 #    Import send_cmds() from calibration.py instead of defunct adc_cal2.py.  Also
 #    update the code to work with 16 antennas.
+#  2025-Dec-02  SY
+#    Added heartbeat file touches to support external watchdog restarts.
 #
 import roach as r
 import struct
@@ -79,6 +81,19 @@ from util import Time, ant_str2list
 from copy import copy
 import sys
 import stateframe as stf
+import os
+
+HB_PATH = os.environ.get('ADC_PLOT_HEARTBEAT')
+
+def write_heartbeat():
+    """Touch the heartbeat file (if configured) so the wrapper can detect liveness."""
+    if not HB_PATH:
+        return
+    try:
+        with open(HB_PATH, 'w') as hb:
+            hb.write(str(time()))
+    except Exception:
+        pass
 
 #set up threading
 class AGC_Thread (threading.Thread):
@@ -123,7 +138,7 @@ class AGC_Thread (threading.Thread):
             self.levels = levels  # Current FEM levels, one for each channel of this ROACH board
             self.agc = agc  # Whether AGC is active, one for each antenna of this ROACH board
             if self.verbose:
-                print self.name+" Execution Time= "+str(time()-start)   #display the execution time
+                print(self.name+" Execution Time= "+str(time()-start))   #display the execution time
         self.lock.release()
             
     def grab_all(self):
@@ -204,9 +219,9 @@ class AGC_Thread (threading.Thread):
         for c in range(4):
             slotarray, idx = np.unique(slots[c],return_index=True)
             if self.verbose:
-                print roachname, c, '   Missing:',50-len(idx)
+                print(roachname, c, '   Missing:',50-len(idx))
 #            if len(idx) != 50:
-#                print roachname,c,find_missing(slotarray)
+#                print(roachname,c,find_missing(slotarray))
             outdata[c,slotarray] = udata[c,idx]
             
         rn.fpga.stop()
@@ -280,6 +295,7 @@ def adc_monitor(nloop=None, ant_str= 'Ant1-15', verbose=False):
 
     # Give threads some time to work
     sleep(45)
+    write_heartbeat()
 
     savlevs = np.zeros((8,4),int)
     newlevs = np.zeros((8,4),int)
@@ -291,13 +307,13 @@ def adc_monitor(nloop=None, ant_str= 'Ant1-15', verbose=False):
         waittime = 45 - t0 % 60
         if waittime < 0: waittime += 60
         if verbose: 
-            print "waittime: "+str(waittime)
+            print("waittime: "+str(waittime))
             sys.stdout.flush()
 
         sleep(waittime)
         t = Time.now().iso
         if verbose: 
-            print t
+            print(t)
             sys.stdout.flush()
         
     #    stdev[0:-1]=stdev[1:]
@@ -392,6 +408,7 @@ def adc_monitor(nloop=None, ant_str= 'Ant1-15', verbose=False):
         fh2.close()
         sys.stdout.write('Time now: '+t[:19]+'. Stops at: '+Time(mjdstop,format='mjd').iso[:19]+'\n')
         sys.stdout.flush()
+        write_heartbeat()
             
     for i,t in enumerate(threads):
         t.stop=True
@@ -402,6 +419,7 @@ def adc_monitor(nloop=None, ant_str= 'Ant1-15', verbose=False):
         
     sys.stdout.write("Total Time= "+str(time()-tt))
     sys.stdout.close()
+    write_heartbeat()
     exit()
     
 def adc_plot(fname,tplot=None):
@@ -487,7 +505,7 @@ def adc_plot(fname,tplot=None):
             if strike == 3: 
                 # File is not growing, so end the loop
                 break
-    print 'File ended at time',t
+    print('File ended at time',t)
 
 def adc2master_table(fname=None, time=None, navg=10, attnval=None, ant_str=None):
     ''' Reads the ADC measurements from a file in the /tmp folder and,
@@ -502,10 +520,10 @@ def adc2master_table(fname=None, time=None, navg=10, attnval=None, ant_str=None)
     '''
     # Read standard deviations and produce a DCM master table
     if fname is None:
-        print 'Please include name of ADC data file (.npy file in /tmp)'
+        print('Please include name of ADC data file (.npy file in /tmp)')
         return
     if time is None:
-        print 'Please enter a time as Time() object.'
+        print('Please enter a time as Time() object.')
         return
     
     fh = open(fname,'rb')
@@ -518,7 +536,7 @@ def adc2master_table(fname=None, time=None, navg=10, attnval=None, ant_str=None)
         try:
             attnval = int(ans)
         except:
-            print 'Response',ans,'did not translate to an integer dB.'
+            print('Response',ans,'did not translate to an integer dB.')
             return
         
     while (1):
@@ -527,7 +545,7 @@ def adc2master_table(fname=None, time=None, navg=10, attnval=None, ant_str=None)
             if out.item()['time'] > time:
                 break
         except IOError:
-            print 'Reached end of file before time found.'
+            print('Reached end of file before time found.')
             fh.close()
             return
             
@@ -536,7 +554,7 @@ def adc2master_table(fname=None, time=None, navg=10, attnval=None, ant_str=None)
         try:
             out = np.load(fh)
         except IOError:
-            print 'Reached end of file before navg records read.'
+            print('Reached end of file before navg records read.')
             fh.close()
             return
         stdev.append(out.item()['stdev'])
@@ -587,13 +605,13 @@ def adc2master_table(fname=None, time=None, navg=10, attnval=None, ant_str=None)
     for i in range(52):
         newtbl.append('{:2} : {:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}{:3}'.format(i+1,*new_table[i]))
     for line in newtbl:
-        print line
+        print(line)
 
     # ************ This block commented out due to loss of SQL **************
     ans = raw_input('Do you want to write this to the SQL database DCM master table? [y/n]?')
     if ans.upper() == 'Y':
         import cal_header
-        print cal_header.dcm_master_table2sql(newtbl)
+        print(cal_header.dcm_master_table2sql(newtbl))
     # Replaced by:
     ans = raw_input('Do you want to save this to a DCM master table file? [y/n]?')
     if ans.upper() == 'Y':
@@ -611,9 +629,9 @@ def adc2master_table(fname=None, time=None, navg=10, attnval=None, ant_str=None)
         acc.login('admin', 'observer')
         acc.cwd('parm')
         # Send DCM table lines to ACC
-        print acc.storlines('STOR DCM_master_table.txt', f)
+        print(acc.storlines('STOR DCM_master_table.txt', f))
         f.close()
-        print 'Successfully wrote DCM_master_table to ACC'
+        print('Successfully wrote DCM_master_table to ACC')
 
 
 def another_pid(mypid):
@@ -635,7 +653,7 @@ if __name__ == "__main__":
     mypid = str(os.getpid())
     dup_pid = another_pid(mypid)
     if dup_pid:
-        print "Another instance of adc_plot.py is already running at PID:", dup_pid
+        print("Another instance of adc_plot.py is already running at PID:", dup_pid)
     else:
         if len(sys.argv) == 2:
             ant_str = sys.argv[1]
