@@ -640,11 +640,11 @@ def azel_from_sqldict(sqldict, antlist=None):
 def PA_adjust(ant=None, crossed=False, offset_angle=0):
     ''' Spawned task to check the changing parallactic angle of given
         antenna and rotate the position angle of the focus rotation
-        mechanism on Ant14 to counteract it.  Checks for Abort message
+        mechanism on Ant 27m to counteract it.  Checks for Abort message
         once per second, and updates PA once per minute (if needed).
         
         This routine is invoked with $PA-TRACK command in the schedule,
-        and aborts with $PA-STOP command, or if Ant14 is removed from
+        and aborts with $PA-STOP command, or if Ant 27m is removed from
         the current subarray.
         
         Optional keyword:
@@ -717,7 +717,7 @@ def PA_sweep(PA=80,rate=3):
         for Abort message once per second.
         
         This routine is invoked with $PA-SWEEP command in the schedule,
-        and aborts with $PA-STOP command, or if Ant14 is removed from
+        and aborts with $PA-STOP command, or if Ant 27m is removed from
         the current subarray.
         
         PA:  Initial PA is negative of this, and sweeps until PA is reached.
@@ -798,7 +798,7 @@ def PA_sweep(PA=80,rate=3):
         # If PA is reached, then exit
         if pa_to_send == PA:
             break
-    # To get here, either Ant14 is not in the subarray, or we got 
+    # To get here, either Ant 27m is not in the subarray, or we got 
     # an Abort message, or the FRM has reached PA.  In any of these cases, 
     # reset the PA to 0 and exit.
     send_cmds(['frm-set-pa 0 ant16'],acc)

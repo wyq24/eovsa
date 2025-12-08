@@ -523,7 +523,7 @@ def plot_pointing_tracks(trange, savefig=False, outdir="/common/webplots/ant_tra
                 time_fmt = DateFormatter("%H:%M")
                 ax.xaxis.set_major_formatter(time_fmt)
                 if aidx >= nant - 2:
-                    ax.legend(loc='lower center')
+                    ax.legend(loc='lower right')
             fig.autofmt_xdate()
             fig.tight_layout(rect=[0, 0, 1, 0.96])
             fig.suptitle('Antenna {} Tracking Monitor for {}'.format(cfg['title'], trange[0].strftime('%Y-%m-%d')), y=0.995)
@@ -558,16 +558,16 @@ def plot_pointing_tracks(trange, savefig=False, outdir="/common/webplots/ant_tra
                     req = azeldict[cfg['requested_key']][:, aidx]
                     act = azeldict[cfg['actual_key']][:, aidx]
                 if aidx == ant16_idx:
-                    ax.plot(t_Anta_plt, feed_angle, label='Pos Angle', linestyle='none', c='C1', marker='o', markersize=1)
                     ax.plot(t_Anta_plt, feed_offset, label='Pos Off', linestyle='-', c='#7f7f7f', lw=5)
                     ax.plot(t_Anta_plt, feed_error, label='Pos Err', linestyle='-', c="#dadada", lw=5)
+                    ax.plot(t_Anta_plt, feed_angle, label='Pos Angle', linestyle='none', c='C1', marker='o', markersize=1)
                 else:
                     ax.plot(t_datetime, par_angle[:, aidx], label='Par Ang', linestyle='none', c='C1', marker='o', markersize=1)
                 ax.grid(False)
                 time_fmt = DateFormatter("%H:%M")
                 ax.xaxis.set_major_formatter(time_fmt)
                 if aidx == ant16_idx or aidx >= nant - 2:
-                    ax.legend(loc='lower center')
+                    ax.legend(loc='lower right')
             fig.autofmt_xdate()
             fig.tight_layout(rect=[0, 0, 1, 0.96])
             fig.suptitle('Antenna Feed Angle Monitor for {}'.format(trange[0].strftime('%Y-%m-%d')), y=0.995)
@@ -599,6 +599,16 @@ if __name__ == '__main__':
     main()
 
 
+'''
+Example usage:
+$ python /common/python/current/daily_track.py --date 2025-07-24 --coord fa
+or in ipython session:
+from daily_track import plot_pointing_tracks
+from datetime import datetime
+trange = [datetime(2025, 9, 9, 12, 50, 0), datetime(2025, 9, 9, 14, 50, 0)]
+plot_pointing_tracks(trange, savefig=True, outdir='/common/webplots/ant_track/', showplt=False, coord=['fa'])
+
+'''
 # # Define fixed time range for plotting
 # trange = [
 #     datetime(2025, 10, 6, 12, 0, 0),
@@ -607,6 +617,6 @@ if __name__ == '__main__':
 #
 #
 # trange = [
-#     datetime(2025, 10, 7, 12, 0, 0),
-#     datetime(2025, 10, 8, 4, 0, 0)
+#     datetime(2025, 8, 5, 12, 0, 0),
+#     datetime(2025, 8, 11, 4, 0, 0)
 # ]

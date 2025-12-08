@@ -1302,22 +1302,57 @@ def rd_refcal(file, quackint=120., navg=3):
             if nsolant == 13:
                 pa[:, [8, 9, 10, 12]] = 0.0    # From a time before old antenna replacement
             nt = len(idx)  # Number of times in this refcal
-            # Apply X-Y delay phase correction
-            for a in range(nsolant):
-                a1 = lobe(dxy[a] - dxy[nsolant])
-                a2 = -dxy[nsolant] - xi
-                a3 = dxy[a] - xi + np.pi
-                for j in range(nt):
-                    vis2[a, 1, :, j] *= np.exp(1j * a1)
-                    vis2[a, 2, :, j] *= np.exp(1j * a2)
-                    vis2[a, 3, :, j] *= np.exp(1j * a3)
-            for j in range(nt):
-                for a in range(nsolant):
-                    vis[a, 0, :, j] = vis2[a, 0, :, j] * np.cos(pa[j, a]) + vis2[a, 3, :, j] * np.sin(pa[j, a])
-                    vis[a, 2, :, j] = vis2[a, 2, :, j] * np.cos(pa[j, a]) + vis2[a, 1, :, j] * np.sin(pa[j, a])
-                    vis[a, 3, :, j] = vis2[a, 3, :, j] * np.cos(pa[j, a]) - vis2[a, 0, :, j] * np.sin(pa[j, a])
-                    vis[a, 1, :, j] = vis2[a, 1, :, j] * np.cos(pa[j, a]) - vis2[a, 2, :, j] * np.sin(pa[j, a])
+            # Apply X-Y delay phase correction (vectorized over antennas, bands, and times)
+
+            a1 = lobe(dxy[:nsolant] - dxy[nsolant])
+            a2 = -dxy[nsolant] - xi
+            a3 = dxy[:nsolant] - xi + np.pi
+            phase1 = np.exp(1j * a1)
+            phase2 = np.exp(1j * a2)
+            phase3 = np.exp(1j * a3)
+            vis2[:nsolant, 1, :, :] *= phase1[:, :, None]
+            vis2[:nsolant, 2, :, :] *= phase2[None, :, None]
+            vis2[:nsolant, 3, :, :] *= phase3[:, :, None]
+            
+            # Apply parallactic angle rotation
+            pa_ant = pa[:, :nsolant].astype(np.float)
+            cos_pa = (np.cos(pa_ant)).T[:, None, :]        # (nsolant, 1, nt)
+            sin_pa = (np.sin(pa_ant)).T[:, None, :]        # (nsolant, 1, nt)
+            v0 = vis2[:nsolant, 0, :, :]
+            v1 = vis2[:nsolant, 1, :, :]
+            v2 = vis2[:nsolant, 2, :, :]
+            v3 = vis2[:nsolant, 3, :, :]
+            vis[:nsolant, 0, :, :] = v0 * cos_pa + v3 * sin_pa
+            vis[:nsolant, 2, :, :] = v2 * cos_pa + v1 * sin_pa
+            vis[:nsolant, 3, :, :] = v3 * cos_pa - v0 * sin_pa
+            vis[:nsolant, 1, :, :] = v1 * cos_pa - v2 * sin_pa
         # *******
+    if mjd >= Time('2025-08-08').mjd:
+        trange = Time(out['time'][[0,-1]],format='jd')
+        times, chi = db.get_chi(trange)
+        tchi = times.jd
+        t = out['time']
+        # This entire section needs rewriting when we start nightly Ant A feed rotation to zero the parallactic angle
+        if len(t) > 0:
+            vis2 = deepcopy(vis)
+            idx = nearest_val_idx(t, tchi)
+            pa = chi[idx]  # Parallactic angle for the times of this refcal.        
+            
+            # ANT A FRM had a limit of +/-90 degrees, so the PA values sent by the schedule
+            # is wrapped accordingly by stateframe.PA_adjust(). Here we unwrap those values so that
+            # values beyond +/-90 degrees are shifted by +/-180 degrees. Currently, Ant4 is used 
+            # to track the PA values. The time-dependent phase corr value extracted from Ant 4 is
+            # added to all solar antennas.
+            pa_ant4 = pa[:, 3].astype(np.float)  # Ant 4 is index 3
+            pa_adjust = np.zeros_like(pa_ant4) 
+            pa_pad = np.deg2rad(0.5)  # 0.5 degree padding to avoid edge cases  
+            lim_hi = pa_ant4 > np.pi/2.0+pa_pad
+            lim_lo = pa_ant4 < -np.pi/2.0+pa_pad
+            pa_adjust[lim_hi] += np.pi
+            pa_adjust[lim_lo] -= np.pi
+            vis_adjust = np.exp(1j * pa_adjust)
+            vis[:nsolant, :, :, :] *= vis_adjust[None, None, None, :]
+
     if fghz[1] < 1.:
         fghz[1] = 1.9290   # This band is missing, but no need to set its frequency to zero...
     return {'file': file, 'source': out['source'], 'vis': vis, 'bands': bands, 'fghz': fghz, 'times': out['time'], 'ha': out['ha'], 'dec': out['dec'], 'flag': np.zeros_like(vis, dtype=np.int)}
