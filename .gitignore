@@ -50,3 +50,6 @@ __pycache__/
 
 ovsa_site/*
 
+.vscode/*
+
+*.test.py

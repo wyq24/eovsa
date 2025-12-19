@@ -391,7 +391,7 @@ class App():
             refant, = np.where(self.refant==1)
             refant = refant[0]
             if ant == refant+1:
-                ax.plot(self.fghz,lobe(self.ph[ant-1,self.pol[i]] - 2*np.pi*self.fghz*tau),'.',label=polstr[i])
+                ax.plot(self.fghz,lobe(self.ph[ant-1,self.pol[i]] - 2*np.pi*self.fghz*tau),'.',label=polstr[i])                
                 if self.pol[i] == 0:
                     pxx = lobe(self.ph[ant-1,self.pol[i]] - 2*np.pi*self.fghz*tau)
                 if self.pol[i] == 1:

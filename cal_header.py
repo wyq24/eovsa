@@ -1039,7 +1039,7 @@ def send_xml2sql(type=None, t=None, test=False, nant=None, nfrq=None):
         As a debugging tool, if test is True, this routine goes through the
         motions but does not write to the abin table.
     '''
-    import dbutil, read_xml2, sys
+    import dbutil, read_xml2, sys, os
     if t is None:
         t = util.Time.now()
     timestamp = int(t.lv)  # Current time as LabVIEW timestamp
@@ -1062,10 +1062,14 @@ def send_xml2sql(type=None, t=None, test=False, nant=None, nfrq=None):
             exec 'buf = ' + typdict[key][1] + '()'
         # Resulting buf must be written to a temporary file and reread
         # by xml_ptrs()
-        f = open('/tmp/tmp.xml', 'wb')
+        xmlfile = '/tmp/tmp.xml'
+        f = open(xmlfile, 'wb')
         f.write(buf)
         f.close()
-        mydict, xmlver = read_xml2.xml_ptrs('/tmp/tmp.xml')
+        mydict, xmlver = read_xml2.xml_ptrs(xmlfile)
+        # Remove temporary file
+        if os.path.exists(xmlfile):
+            os.system('rm -rf {}'.format(xmlfile))
         defn_version = float(key) + xmlver / 10.  # Version number expected
         # Retrieve most recent key.0 record and check its version against the expected one
         query = 'select top 1 * from abin where Version = ' + str(key) + '.0 and Timestamp <= ' + str(
@@ -1237,6 +1241,8 @@ def read_cal_xmlX(caltype, t=None, verbose=True, neat=False, gettime=False):
                 f.write(buf)
                 f.close()
                 xmldict, thisver = read_xml2.xml_ptrs(xmlfile)
+                if os.path.exists(xmlfile):
+                    os.system('rm -rf {}'.format(xmlfile))
                 return xmldict, thisver
 
 
@@ -1416,7 +1422,7 @@ def write_cal(type, buf, t=None):
         
         Returns True if success, or False if failure.
     '''
-    import dbutil, read_xml2, sys
+    import dbutil, read_xml2, sys, os
     if t is None:
         t = util.Time.now()
     timestamp = int(t.lv)  # Given (or current) time as LabVIEW timestamp
@@ -1440,10 +1446,13 @@ def write_cal(type, buf, t=None):
             return False
         else:
             # There is one, so read it and do a sanity check against binary data
-            f = open('/tmp/tmp.xml', 'wb')
+            xmlfile = '/tmp/tmp.xml'
+            f = open(xmlfile, 'wb')
             f.write(outdict['Bin'][0])
             f.close()
-            keys, mydict, fmt, ver = read_xml2.xml_read('/tmp/tmp.xml')
+            keys, mydict, fmt, ver = read_xml2.xml_read(xmlfile)
+            if os.path.exists(xmlfile):
+                os.system('rm -rf {}'.format(xmlfile))
             binsize = get_size(fmt)
             if len(buf) == binsize:
                 cursor.execute('insert into aBin (Timestamp,Version,Description,Bin) values (?,?,?,?)',

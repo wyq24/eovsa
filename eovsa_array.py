@@ -40,10 +40,10 @@
 #   2017-Apr-04  DG
 #      Update to Ant 13 Bx and By, and the Bz values for all antennas, based on 2017 Apr. 1 data.
 #   2017-Apr-16  DG
-#      Final (?) update of Bx, By, and Bz based on very precise measurements on 2017 Apr. 16 
+#      Final (?) update of Bx, By, and Bz based on very precise measurements on 2017 Apr. 16
 #      But Ant 12 not working, so final numbers for it are still needed.
 #   2017-Jul-04  DG
-#      Update of Bx, By and Bz, based on 2017-Jul-03 measurements, mainly to correct ants 12 
+#      Update of Bx, By and Bz, based on 2017-Jul-03 measurements, mainly to correct ants 12
 #      and 13 Bx and By, but also minor tweaks elsewhere.  Note that Ant 12 Bz could not be
 #      measured reliably due to large Bx, By errors, so it needs another Bz tweak.
 #   2025-May-20  DG
@@ -61,7 +61,8 @@
 #      of the offset axes of the new dishes.
 #
 
-import aipy, ephem
+import aipy
+import ephem
 import numpy as np
 from util import Vector, Time
 
@@ -135,9 +136,12 @@ def bl_cor(x, y, z, iant):
     '''
 
     # Initial baseline corrections (all zeros) on 2025-05-22
-    dx = np.array([0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00])
-    dy = np.array([0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00])
-    dz = np.array([0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00])
+    dx = np.array([0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                  0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00])
+    dy = np.array([0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                  0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00])
+    dz = np.array([0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                  0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00])
 
     # Update based on 2253+161 obs. on 2025 Jul 8 -- in ns (dx and dy only for now)
     dx += np.array(
@@ -215,6 +219,16 @@ def bl_cor(x, y, z, iant):
         [0.000, 0.000, 0.001, 0.002, 0.002, 0.002, 0.002, 0.002, 0.018, -0.006, 0.001, -0.001, -0.002, 0.000, 0.000,
          -0.006])
 
+    # Update based on obs. 20251212150452_1229+020 and 20251213000652_2253+161 on 2025 Dec 12 -- in ns
+    dz += np.array(
+        [0.000, 0.000, 0.011, -0.096, -0.011, 0.000, 0.133, 0.012, 0.000, -1.098, -1.171, 0.014, -1.117, 0.000, 0.000,
+         0.097])
+
+    # Update based on obs. 20251218150852_1229+020 and 20251218235753_2253+161 on 2025 Dec 18 -- in ns
+    dz += np.array(
+        [0.000, 0.000, 0.000, 0.000, 0.000, -0.106, 0.000, 0.000, 0.000, 0.000, 0.139, 0.000, 0.000, 0.000, 0.000, 
+         0.052])
+
     # Corrections are subtracted from nominal positions.
     xp = x - dx[iant]
     yp = y - dy[iant]
@@ -281,14 +295,17 @@ def bl_cor0(x, y, z, iant):
     mperns = 0.299792458  # Meters per nanosecond
 
     # Initial baseline corrections (based on Satellite obs. on 2016 Mar 20)
-    dx = np.array([0.00, 0.08, 0.30, 0.67, 0.35, -0.13, -0.09, 0.94, -6.37, 6.51, 1.15, -12.50, 13.31, 0.0, 0.0, 0.0])
+    dx = np.array([0.00, 0.08, 0.30, 0.67, 0.35, -0.13, -0.09,
+                  0.94, -6.37, 6.51, 1.15, -12.50, 13.31, 0.0, 0.0, 0.0])
     dy = np.array(
         [0.00, -0.45, 0.17, -0.39, 0.18, -0.79, -0.64, 1.47, -23.56, 21.54, -2.50, -38.75, 65.38, 0.0, 0.0, 0.0])
-    dz = np.array([0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0])
+    dz = np.array([0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                  0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.0, 0.0, 0.0])
     # Update based on Satellite obs. on 2016 Mar 29 (adds Ant14)
     dx += np.array(
         [0.00, 0.61, -0.22, 0.14, -0.06, -0.19, 0.28, -0.19, 2.38, -1.84, -0.91, 4.58, -7.61, -2.44, 0.0, 0.0])
-    dy += np.array([0.00, 0.22, 0.29, 0.44, 0.00, 0.38, 0.17, -0.29, 1.72, -2.97, 1.64, 5.10, -8.89, 3.56, 0.0, 0.0])
+    dy += np.array([0.00, 0.22, 0.29, 0.44, 0.00, 0.38, 0.17, -
+                   0.29, 1.72, -2.97, 1.64, 5.10, -8.89, 3.56, 0.0, 0.0])
     # Update based on 3C84 obs. on 2016 May 22 -- these are in m, hence the divieion by mperns
     #                   A1     2     3     4     5     6      7     8      9     10    11     12    13    14
     dx += np.array(
@@ -298,11 +315,12 @@ def bl_cor0(x, y, z, iant):
     # Update based on 3C273 obs. on 2016 May 27 -- these are in ns
     dx += np.array(
         [0.00, -1.20, 0.66, -0.19, 0.86, 1.33, 0.37, -0.42, 2.41, 0.36, -3.19, 25.91, -1.44, -0.69, 0.0, 0.0])
-    dy += np.array([0.00, 0.19, -0.13, 0.05, 0.15, 0.39, 0.68, -0.90, 2.29, 0.22, -0.25, 14.35, 0.00, 0.15, 0.0, 0.0])
+    dy += np.array([0.00, 0.19, -0.13, 0.05, 0.15, 0.39, 0.68, -
+                   0.90, 2.29, 0.22, -0.25, 14.35, 0.00, 0.15, 0.0, 0.0])
     # Update based on 3C273 and 3C286 obs. on 2016 May 28 -- again in ns
     dz += np.array(
         [0.00, -0.01, 0.98, -0.15, -2.19, -0.10, 0.05, 0.05, 19.08, 11.80, 7.80, -15.20, 8.75, 6.80, 0.0, 0.0])
-    # Update based on multiple sources on 2016 Nov 17, after axis-offset correction (ants 5-8 not in service) 
+    # Update based on multiple sources on 2016 Nov 17, after axis-offset correction (ants 5-8 not in service)
     # Further update 2016 Nov 18
     #                   A1     2      3      4      5      6     7    8     9      10    11     12     13     14
     dx += np.array(
@@ -374,7 +392,8 @@ def suntimes(t=None, out=None):
     if t is None:
         t = Time()
     date = t.iso.replace('-', '/')[:10] + ' 20:00'
-    risestr = str(aa.previous_rising(ephem.Sun(), start=date)).replace('/', '-')
+    risestr = str(aa.previous_rising(
+        ephem.Sun(), start=date)).replace('/', '-')
     setstr = str(aa.next_setting(ephem.Sun(), start=date)).replace('/', '-')
     if out is 'str':
         return risestr, setstr
@@ -415,13 +434,15 @@ def sun_risetime(t, limit_deg=10):
                     s1.alt, h, m
                     # Loop over second of minute
                     for s in range(60):
-                        jultime = 2400000.5 + mjd_day + (h + (m + s / 60.) / 60.) / 24.
+                        jultime = 2400000.5 + mjd_day + \
+                            (h + (m + s / 60.) / 60.) / 24.
                         aa.set_jultime(jultime)
                         s1.compute(aa)
                         if s1.alt > limit_rad:
                             print
                             s1.alt, h, m, s
-                            risetime = Time(mjd_day + (h + (m + s / 60.) / 60.) / 24., format='mjd')
+                            risetime = Time(
+                                mjd_day + (h + (m + s / 60.) / 60.) / 24., format='mjd')
                             return risetime
 
 
@@ -453,9 +474,11 @@ def sun_settime(t, limit_deg=10):
                     m -= 1
                     # Loop over second of minute
                     for s in range(60):
-                        jultime = 2400000.5 + mjd_day + (h + (m + s / 60.) / 60.) / 24.
+                        jultime = 2400000.5 + mjd_day + \
+                            (h + (m + s / 60.) / 60.) / 24.
                         aa.set_jultime(jultime)
                         s1.compute(aa)
                         if s1.alt < limit_rad:
-                            settime = Time(mjd_day + (h + (m + s / 60.) / 60.) / 24., format='mjd')
+                            settime = Time(
+                                mjd_day + (h + (m + s / 60.) / 60.) / 24., format='mjd')
                             return settime

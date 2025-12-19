@@ -1013,11 +1013,15 @@ def send_xml2sql(caltype=None, t=None, test=False, nant=None, nfrq=None):
             exec(bufcmd)
         # Resulting buf must be written to a temporary file and reread
         # by xml_ptrs()
-        f = open('/tmp/tmp.xml', 'rb')
+        xmlfile = '/tmp/tmp.xml'
+        f = open(xmlfile, 'rb')
         buf = f.read()
         f.close()
 
-        mydict, xmlver = read_xml2.xml_ptrs('/tmp/tmp.xml')
+        mydict, xmlver = read_xml2.xml_ptrs(xmlfile)
+        # Remove the temporary file
+        if os.path.exists(xmlfile):
+            os.system('rm -rf {}'.format(xmlfile))
         defn_version = float(key) + xmlver / 10.  # Version number expected
         # Retrieve most recent key.0 record and check its version against the expected one
         if str(type(cursor)).find('pyodbc') == -1:
@@ -1200,7 +1204,8 @@ def read_cal_xmlX(caltype, t=None, verbose=True, neat=False, gettime=False):
                     xmldict, thisver = read_xml2.xml_ptrs(xmlfile)
                     xml.append(xmldict)
                     ver.append(thisver)
-                os.system('rm -rf {}'.format(xmlfile))
+                if os.path.exists(xmlfile):
+                    os.system('rm -rf {}'.format(xmlfile))
                 if gettime:
                     ts = [tlist[ll] for ll in idxs]
                     return xml, ver, ts
@@ -1428,10 +1433,13 @@ def write_cal(caltype, buf, t=None):
             return False
         else:
             # There is one, so read it and do a sanity check against binary data
-            f = open('/tmp/tmp.xml', 'wb')
+            xmlfile = '/tmp/tmp.xml'
+            f = open(xmlfile, 'wb')
             f.write(outdict['Bin'][0])
             f.close()
-            keys, mydict, fmt, ver = read_xml2.xml_read('/tmp/tmp.xml')
+            keys, mydict, fmt, ver = read_xml2.xml_read(xmlfile)
+            if os.path.exists(xmlfile):
+                os.system('rm -rf {}'.format(xmlfile))
             binsize = get_size(fmt)
             if len(buf) == binsize:
                 if mysql:
