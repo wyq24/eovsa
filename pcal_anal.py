@@ -220,7 +220,11 @@ def graph(f,navg=None,path=None):
             ax[j,k].xaxis.set_major_formatter(FormatStrFormatter('%.2f'))
             if k in range(1,nsolant): ax[j,k].yaxis.set_visible(False)
             if j in range(3): ax[j,k].xaxis.set_visible(False)
-            if j == 0: ax[0,k].title.set_text('antenna %d' %(k+1))
+            if j == 0: 
+                if k==0:
+                    ax[0,k].title.set_text('Ant%d' %(k+1))
+                else:
+                    ax[0,k].title.set_text('Ant%d-Ant1' %(k+1))
     fig.suptitle(out['source']+'  '+Time(out['time'][0],format='jd').iso[:19]+' UT  '+fstr+warn)
     ax[0,0].set_ylabel('XX Phase')
     ax[1,0].set_ylabel('YY Phase')
@@ -248,7 +252,11 @@ def graph(f,navg=None,path=None):
             ax[j,k].xaxis.set_major_formatter(FormatStrFormatter('%.2f'))
             if k in range(1,nsolant): ax[j,k].yaxis.set_visible(False)
             if j in range(3): ax[j,k].xaxis.set_visible(False)
-            if j == 0: ax[0,k].title.set_text('antenna %d' %(k+1))
+            if j == 0: 
+                if k==0:
+                    ax[0,k].title.set_text('Ant%d' %(k+1))
+                else:
+                    ax[0,k].title.set_text('Ant%d-Ant1' %(k+1))
     fig.suptitle(out['source']+' '+Time(out['time'][0],format='jd').iso[:19]+' UT'+warn)
     ax[0,0].set_ylabel('XX Phase')
     ax[1,0].set_ylabel('YY Phase')
@@ -317,6 +325,8 @@ def pcal_anal(trange,path=None):
 
             
 if __name__ == '__main__':
+    # This code is running on dpp as a cron job using the shell script 
+    # /home/user/test_svn/shell_scripts/pcal_anal.sh
     import matplotlib
     matplotlib.use('Agg')
     path='/common/webplots/phasecal/'

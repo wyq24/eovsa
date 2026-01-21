@@ -219,7 +219,7 @@ def pcal_anal(trange,path=None):
             graph(flist,path=path)
 
             
-if __name__ == '__main__':
+if __name__ == '__main__':    
     import matplotlib
     matplotlib.use('Agg')
     path='/common/webplots/phasecal/'

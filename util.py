@@ -1284,9 +1284,11 @@ def lin_phase_fit(f, pha, doplot=False):
         # Not enough points to fit, so return zeros and a large standard deviation
         return np.array((0, 0, np.pi))
     f_ = f[good]
-    pha_ = pha[good]
-    for i in range(len(f_) - 1):
-        dpdf.append((pha_[i + 1] - pha_[i]) / (f_[i + 1] - f_[i]))
+    pha_ = pha[good]    
+    df = np.diff(f_)
+    dpdf = np.divide(np.diff(pha_), df, out=np.full(df.shape, np.nan), where=df != 0)
+    slp = np.nanmedian(dpdf)
+        
     dpdf = np.array(dpdf)
     slp = np.median(dpdf)
     p = np.polyfit(f_, np.unwrap((pha_ - f_ * slp)), 1)
