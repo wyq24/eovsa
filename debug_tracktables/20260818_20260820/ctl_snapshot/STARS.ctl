@@ -1,0 +1,4 @@
+$SCAN-STOP
+SUBARRAY1 ant15
+TRACKTABLE startracktable.radec
+TRACK

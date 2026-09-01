@@ -452,11 +452,14 @@ import cal_header
 import adc_cal2
 import pcapture2
 from whenup import make_sched, remove_cal
+from schedule_status import load_executed_lines, write_schedule_status
 
 
 ANT13_FEM_ALERT_RECIPIENT = 'sijie.yu@njit.edu'
 ANT13_FEM_WARMUP_SECONDS = 300
 ANT13_SUBARRAY_STATE_MAX_AGE = 10
+SCHEDULE_STATUS_FILE = '/common/webplots/status.txt'
+SCHEDULE_SKIP_STATE_FILE = '/common/webplots/skip_phacal_status.json'
 ANT13_FEM_BUILTIN_COMMANDS = {
     'FEMPOWERON': ['$POWER FEM ON ANT13'],
     'FEMPOWEROFF': ['$SCAN-STOP', '$WAIT 2', '$POWER FEM OFF ANT13']}
@@ -808,6 +811,7 @@ class App():
         self.root.geometry("+100+0")
         
         self.subarray_name = subarray_name # Subarray1 for master schedule, sys.argv[1] for 2nd schedule
+        self._geosat_prepare_thread = None
         
         # Define self.mypid, since this will be used by get_subarray_pid() and wake_up()
         self.mypid = mypid
@@ -970,6 +974,8 @@ class App():
         self.L2.config( yscrollcommand = self.S2.set)
 
         self.skip_phacal_indices = set()
+        self.executed_skip_phacal_indices = set()
+        self.executed_skip_phacal_lines = []
 
         self.downbutton = Button(fmain, text = '- 1', command=self.Decrease_cmd)
         self.downbutton.pack(side=LEFT)
@@ -1063,7 +1069,9 @@ class App():
         # Generate the Antenna Array object, used to calculate source coordinates,
         # uvw, delays, etc.
         sys.stdout.flush()
-        self.aa = eovsa_cat.eovsa_array_with_cat()
+        # Normal solar scheduling does not need satellite TLEs.  GEOSAT and
+        # DELAYCAL schedules prepare GEO data when their .scd file is opened.
+        self.aa = eovsa_cat.eovsa_array_with_cat(include_satellites=False)
         #print(t.iso,self.aa.epoch,' Initial epoch')
 
         self.aa.epoch = '2000/1/1 12:00'      # Get coordinates in J2000 epoch
@@ -1117,6 +1125,49 @@ class App():
         self.status.yview(*args)
 
     #============================
+    def _schedule_lines(self):
+        return [self.L.get(i) for i in range(self.lastline)]
+
+    #============================
+    def _restore_skip_phacal_state(self):
+        lines = self._schedule_lines()
+        self.executed_skip_phacal_lines = load_executed_lines(
+            SCHEDULE_SKIP_STATE_FILE, lines)
+        self.executed_skip_phacal_indices = set()
+        remaining = {}
+        for line in self.executed_skip_phacal_lines:
+            remaining[line] = remaining.get(line, 0) + 1
+        for idx, line in enumerate(lines):
+            if remaining.get(line, 0) > 0:
+                self.executed_skip_phacal_indices.add(idx)
+                remaining[line] -= 1
+
+    #============================
+    def _clear_skip_phacal_state(self):
+        self.executed_skip_phacal_indices = set()
+        self.executed_skip_phacal_lines = []
+
+    #============================
+    def _record_skip_phacal_line(self, idx):
+        if idx in self.executed_skip_phacal_indices or idx >= self.L.size():
+            return
+        self.executed_skip_phacal_indices.add(idx)
+        self.executed_skip_phacal_lines.append(self.L.get(idx))
+
+    #============================
+    def _planned_skip_phacal_indices(self):
+        if not self.skip_phacal.get():
+            return set()
+        now = mjd()
+        planned = set()
+        for idx in self.skip_phacal_indices:
+            if idx >= self.L.size():
+                continue
+            if mjd(self.L.get(idx)) > now:
+                planned.add(idx)
+        return planned
+
+    #============================
     def on_skip_phacal_toggle(self):
         self._update_skip_phacal_indices()
         if self.skip_phacal.get():
@@ -1139,6 +1190,7 @@ class App():
                             self.status.delete(idx)
                             self.status.insert(idx,'Waiting...')
             self._apply_skip_phacal_styling()
+        self.update_status()
 
     #============================
     def _is_midday_phacal(self, idx):
@@ -1253,6 +1305,11 @@ class App():
     def _mark_line_skipped(self, idx):
         if idx >= getattr(self, 'lastline', 0):
             return
+        recorded = False
+        if self.skip_phacal.get() and idx in self.skip_phacal_indices:
+            if mjd(self.L.get(idx)) <= mjd():
+                recorded = idx not in self.executed_skip_phacal_indices
+                self._record_skip_phacal_line(idx)
         if idx < self.status.size():
             try:
                 if self.status.get(idx) != 'Skipped':
@@ -1260,6 +1317,8 @@ class App():
                     self.status.insert(idx, 'Skipped')
             except TclError:
                 pass
+        if recorded:
+            self.update_status()
         if idx < self.L.size():
             try:
                 if self.L.itemcget(idx, 'background') != 'orange':
@@ -1462,6 +1521,29 @@ class App():
                     w.atomlist.insert(END,ctlline.rstrip('\n'))
 
     #============================
+    def _prepare_geosat_catalog(self):
+        '''Refresh the GEO TLE cache in a background thread when needed.'''
+        if (self._geosat_prepare_thread is not None and
+                self._geosat_prepare_thread.is_alive()):
+            return
+
+        def prepare():
+            try:
+                geosats = eovsa_cat.load_geosats()
+                if geosats:
+                    print('GEO satellite catalog is ready.')
+                else:
+                    print('GEO satellite catalog is unavailable; '
+                          'GEOSAT/DELAYCAL will use any local geo.txt.')
+            except Exception as e:
+                # The execution path will use the existing local cache, if any.
+                print('GEO satellite catalog preparation failed:', e)
+
+        self._geosat_prepare_thread = threading.Thread(target=prepare)
+        self._geosat_prepare_thread.daemon = True
+        self._geosat_prepare_thread.start()
+
+    #============================
     def Clear(self):
         #Button to clear the status and the highlight. 
         self.L.selection_clear(0,END)
@@ -1473,6 +1555,8 @@ class App():
         self.L.itemconfig(self.curline,background="white")
         self.curline = 0
         self.status.configure( state = DISABLED)
+        self._clear_skip_phacal_state()
+        self.update_status()
 
     #============================
     def Open(self, filename=None):
@@ -1498,12 +1582,14 @@ class App():
                 return        
         else:
             f = open(filename,'r')
+        needs_geosat_catalog = False
         try:    #takes care of an empty line, if there is one, in
                 #the file being read.
             lines = f.readlines()
         except AttributeError:
             pass
         else:
+            needs_geosat_catalog = eovsa_cat.schedule_uses_geosats(lines)
             self.L.delete(0, END)
             self.curline = 0
             self.lastline = len(lines)
@@ -1543,8 +1629,12 @@ class App():
             self.filename = filenamelist[len(filenamelist)-1:][0]
         else:
             self.filename = filename
+        if needs_geosat_catalog:
+            self._prepare_geosat_catalog()
         # Update the status file in /common/webplots for display on the status web page
+        self._clear_skip_phacal_state()
         self._update_skip_phacal_indices()
+        self._restore_skip_phacal_state()
         self.update_status()
         
     #============================
@@ -1572,7 +1662,10 @@ class App():
         self.lastline = len(scd)
         self.status.configure( state = DISABLED)
         self.filename = 'solar.scd'
+        self._clear_skip_phacal_state()
         self._update_skip_phacal_indices()
+        self._restore_skip_phacal_state()
+        self.update_status()
         
     #============================
     def Save(self):
@@ -1609,6 +1702,9 @@ class App():
         for i in sel:
             # Selection is getting unset, so reset it.
             self.L.selection_set(i)
+        self._clear_skip_phacal_state()
+        self._update_skip_phacal_indices()
+        self.update_status()
 
     #============================
     def Decrease_cmd(self):
@@ -1662,7 +1758,9 @@ class App():
         # If this is the standard solar.scd file, do an auto-generate for today
         if self.filename == 'solar.scd':
             self.New()
+            return
         else:
+            self._clear_skip_phacal_state()
             # Determine how many days from date of first line to today
             line = self.L.get(0)
             days = int(t.mjd) - int(mjd(line))
@@ -1676,6 +1774,8 @@ class App():
                 self.L.insert(i,line)
             self.curline = 0
         self._update_skip_phacal_indices()
+        self._restore_skip_phacal_state()
+        self.update_status()
 
     #============================
     def autogen(self,t):
@@ -1828,6 +1928,8 @@ class App():
                 line = line[:20] + self.content
                 self.L.insert(index,line)
                 self.lastline += self.lastline
+                self._clear_skip_phacal_state()
+                self._update_skip_phacal_indices()
         else:
             # If there is no string do not do anything.
             pass
@@ -2092,7 +2194,7 @@ class App():
         self.error = 'Err: Ant 13 FEM communication not ready'
         body = (message + '\n\n'
                 'The standard solar schedule commanded FEM power ON five '
-                'minutes before its first observation or calibration. Check '
+                'minutes before its next observation or calibration. Check '
                 'vik13 Frontend relay 2 and Ant 13 FEM telemetry before '
                 'relying on Ant 13.')
         thread = threading.Thread(
@@ -2795,56 +2897,41 @@ class App():
             # These are geostationary satellites so far.  If/when we add
             # moving satellite capability, track_mode for those should be 'SATELL'
             sh_dict['track_mode'] = 'FIXED '
-            # Check local file age first
-            geofile = 'geo.txt'
-            try:
-                file_mjd = util.Time(os.stat(geofile).st_mtime, format='lv').mjd + 24107
-                if (util.Time.now().mjd - file_mjd) < 1.:
-                    print(util.Time.now().iso, 'Using recent local {}...'.format(geofile))
-                    f = open(geofile, 'r')
-                    lines = f.readlines()
-                    f.close()
-                else:
-                    raise IOError("{} too old".format(geofile))
-            except:
-                print(util.Time.now().iso, 'No fresh local copy, trying to fetch from Celestrak...')
-                try:
-                    f = urllib2.urlopen('https://celestrak.org/NORAD/elements/gp.php?GROUP=geo&FORMAT=TLE', timeout=5)
-                    lines = f.readlines()
-                    fout = open(geofile, 'w')
-                    for line in lines:
-                        fout.write(line)
-                    fout.close()
-                    f.close()
-                except:
-                    print(util.Time.now().iso, 'Connection to Celestrak failed.')
-                    if os.path.exists(geofile):
-                        print('Using stale local {}...'.format(geofile))
-                        f = open(geofile, 'r')
-                        lines = f.readlines()
-                        f.close()
-                    else:
-                        print('No {} available...cannot trust TLE file'.format(geofile))
-                        sh_dict['source_id'] = 'None'
-                        lines = ['']
-            for i,line in enumerate(lines):
-                 if line.find(sh_dict['source_id']) == 0:
-                     break
-            if i < len(lines):
+            # The GEO cache is prepared when a GEOSAT/DELAYCAL schedule is
+            # opened.  Never contact CelesTrak from this watchdog-controlled
+            # execution path; use stale local data when necessary.
+            lines = eovsa_cat.read_cached_text('geo.txt')
+            geosat_lines = None
+            for i in range(0, len(lines) - 2, 3):
+                if lines[i].find(sh_dict['source_id']) == 0:
+                    geosat_lines = lines[i:i+3]
+                    break
+            if geosat_lines is not None:
                 # This creates an ephem.EarthSatellite object, which does the
                 # right thing in calculating coordinates when the time in aa is updated
-                sat=ephem.readtle(lines[i],lines[i+1],lines[i+2])
-                sf_dict['geosat']=sat
-                sat.compute(self.aa)
-                # Unfortunately, aipy cannot deal with an ephem.EarthSatellite object,
-                # so this creates a fake RadioFixedBody for the current RA,Dec of the 
-                # satellite, to be added to the source catalog. This has to be updated 
-                # once per second in set_uvw()
-                geosat=aipy.amp.RadioFixedBody(sat.ra,sat.dec,name=sat.name)
-                self.aa.cat.add_srcs([geosat,geosat])
+                try:
+                    sat=ephem.readtle(*geosat_lines)
+                    sf_dict['geosat']=sat
+                    sat.compute(self.aa)
+                    # Unfortunately, aipy cannot deal with an ephem.EarthSatellite object,
+                    # so this creates a fake RadioFixedBody for the current RA,Dec of the
+                    # satellite, to be added to the source catalog. This has to be updated
+                    # once per second in set_uvw()
+                    geosat=aipy.amp.RadioFixedBody(sat.ra,sat.dec,name=sat.name)
+                    self.aa.cat.add_srcs([geosat,geosat])
+                except Exception as e:
+                    print('Cannot read GEO TLE for', sh_dict['source_id'], ':', e)
+                    sf_dict['geosat'] = None
+                    sh_dict['source_id'] = 'None'
+                    macro_lines = []
             else:
-                print('Geosat named ',sh_dict['source_id'],'not found!')
+                if lines:
+                    print('Geosat named ',sh_dict['source_id'],'not found in local geo.txt!')
+                else:
+                    print('No local geo.txt available for', sh_dict['source_id'])
+                sf_dict['geosat'] = None
                 sh_dict['source_id']='None'
+                macro_lines = []
         else:
             # Default project is just the first command on line (truncate to 32 chars)
             sh_dict['project'] = cmds[0][:32]
@@ -3704,15 +3791,15 @@ class App():
 
     def update_status(self):
         # Read the current schedule from the list window and write to output file
-        fileout = open('/common/webplots/status.txt','w')
-        for i in range(self.lastline):
-            line = self.L.get(i)
-            if i == self.curline:
-                line = '* '+line
-            else:
-                line = '  '+line
-            fileout.write(line+'\n')
-        fileout.close()
+        lines = self._schedule_lines()
+        write_schedule_status(
+            SCHEDULE_STATUS_FILE,
+            SCHEDULE_SKIP_STATE_FILE,
+            lines,
+            current_index=self.curline,
+            executed_lines=self.executed_skip_phacal_lines,
+            planned_indices=self._planned_skip_phacal_indices(),
+        )
 
 
 app = App()

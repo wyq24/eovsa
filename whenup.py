@@ -60,6 +60,8 @@
 #    Change end STOW line to REWIND.
 #  2026-07-20  SY
 #    Add Ant 13 FEM power events to automatically generated solar schedules.
+#  2026-08-21  SY
+#    Power down Ant 13 during sunset-to-calibration gaps longer than 10 minutes.
 #
 
 import os
@@ -103,7 +105,7 @@ def whenup(date=None,verbose=False):
     # Add times in 1-min steps up to duration dur (hours)
     ts = t + TimeDelta(np.arange(0.,24.,1./60.)/24.,format='jd')
 
-    aa = eovsa_cat.eovsa_array_with_cat()
+    aa = eovsa_cat.eovsa_array_with_cat(include_satellites=False)
 
     nt = len(ts)
     ra = np.zeros((len(srclist),nt))
@@ -202,7 +204,9 @@ def sunup(daterange):
     # Use the 24-h day specified by daterange (i.e. drop the time of day)
     mjd1 = int(daterange[0].mjd)
     mjd2 = int(daterange[1].mjd)
-    aa = eovsa_cat.eovsa_array_with_cat()
+    # sunup() only needs the Sun, which is already present in the base array
+    # catalog.  Avoid loading calibrators and satellite TLE files here.
+    aa = eovsa_cat.eovsa_array()
     taz_rise = []
     teq_rise = []
     taz_set = []
@@ -322,8 +326,9 @@ def add_ant13_fem_power_events(lines):
     :param lines: Schedule lines containing an end-of-day ``REWIND``.
     :type lines: list(str)
     :returns: A new list with ``FEMPOWERON`` five minutes before the first
-              ``ACQUIRE`` (or first remaining event) and ``FEMPOWEROFF`` one
-              minute before ``REWIND``.
+              ``ACQUIRE`` (or first remaining event), an optional idle-gap
+              power cycle around the evening calibration, and
+              ``FEMPOWEROFF`` after the final calibration.
     :rtype: list(str)
 
     The helper is used only by the automatic solar-schedule path.  Custom and
@@ -337,37 +342,91 @@ def add_ant13_fem_power_events(lines):
         if command not in ('FEMPOWERON', 'FEMPOWEROFF'):
             clean_lines.append(line)
 
-    acquire_idx = None
-    rewind_idx = None
-    for i, line in enumerate(clean_lines):
+    def command(line):
         tokens = line[20:].split()
-        command = tokens[0].upper() if tokens else ''
-        if acquire_idx is None and command == 'ACQUIRE':
-            acquire_idx = i
-        if command == 'REWIND':
-            rewind_idx = i
-    if acquire_idx is None:
-        for i, line in enumerate(clean_lines):
-            tokens = line[20:].split()
-            command = tokens[0].upper() if tokens else ''
-            if command and command != 'REWIND':
-                acquire_idx = i
+        return tokens[0].upper() if tokens else ''
+
+    acquire_indices = [i for i, line in enumerate(clean_lines)
+                       if command(line) == 'ACQUIRE']
+    first_acquire_idx = acquire_indices[0] if acquire_indices else None
+    last_acquire_idx = acquire_indices[-1] if acquire_indices else None
+    rewind_indices = [i for i, line in enumerate(clean_lines)
+                      if command(line) == 'REWIND']
+    if not rewind_indices:
+        return clean_lines
+    rewind_idx = rewind_indices[-1]
+
+    # Only a STOW immediately before the evening calibration marks the end of
+    # the final solar scan.  An earlier STOW can belong to a separate morning
+    # schedule segment and must not trigger an idle-gap cycle.
+    stow_idx = None
+    if (last_acquire_idx is not None and last_acquire_idx > 0 and
+            command(clean_lines[last_acquire_idx - 1]) == 'STOW'):
+        stow_idx = last_acquire_idx - 1
+    elif last_acquire_idx is None:
+        # No-27m schedules have no evening ACQUIRE.  Their retained final
+        # STOW is the solar-end marker used for the terminal FEM shutdown.
+        for i in range(rewind_idx - 1, -1, -1):
+            if command(clean_lines[i]) == 'STOW':
+                stow_idx = i
                 break
-    if acquire_idx is None or rewind_idx is None:
+
+    # The first power-on remains the normal five-minute warm-up.  No-27m
+    # schedules have no ACQUIRE lines, so retain the old fallback to their
+    # first scheduled event.
+    initial_idx = first_acquire_idx
+    if initial_idx is None:
+        for i, line in enumerate(clean_lines):
+            if command(line) and command(line) != 'REWIND':
+                initial_idx = i
+                break
+    if initial_idx is None:
         return clean_lines
 
-    power_on_mjd = Time(clean_lines[acquire_idx][:19]).mjd - 5./1440.
-    power_off_mjd = Time(clean_lines[rewind_idx][:19]).mjd - 1./1440.
-    power_on_line = (Time(power_on_mjd, format='mjd').iso[:19] +
-                     ' FEMPOWERON')
-    power_off_line = (Time(power_off_mjd, format='mjd').iso[:19] +
-                      ' FEMPOWEROFF')
+    def power_line(mjd, macro):
+        return (Time(mjd, format='mjd').iso[:19] + ' ' + macro)
 
+    insertions = [(initial_idx, 0,
+                   power_line(Time(clean_lines[initial_idx][:19]).mjd -
+                              5./1440., 'FEMPOWERON'))]
+
+    # With a long sunset-to-calibration gap, shut down directly after STOW and
+    # restart five minutes before the evening (last) ACQUIRE.  The strict
+    # comparison intentionally leaves a ten-minute gap powered continuously.
+    if stow_idx is not None:
+        stow_mjd = Time(clean_lines[stow_idx][:19]).mjd
+        if last_acquire_idx is None:
+            # No-27m schedules have no evening calibration to restart for.
+            insertions.append((stow_idx + 1, 0,
+                               power_line(stow_mjd, 'FEMPOWEROFF')))
+        else:
+            acquire_mjd = Time(clean_lines[last_acquire_idx][:19]).mjd
+            gap_seconds = int(round((acquire_mjd - stow_mjd) * 86400.))
+            if gap_seconds > 10 * 60:
+                insertions.append((stow_idx + 1, 0,
+                                   power_line(stow_mjd, 'FEMPOWEROFF')))
+                if first_acquire_idx != last_acquire_idx:
+                    insertions.append((last_acquire_idx, 1,
+                                       power_line(acquire_mjd - 5./1440.,
+                                                  'FEMPOWERON')))
+
+    # Preserve the existing final shutdown one minute before REWIND whenever
+    # an evening ACQUIRE exists.  For a no-27m schedule with a retained STOW,
+    # the STOW shutdown above is the final FEM event.  If no STOW exists, keep
+    # the original REWIND-relative fallback instead.
+    if last_acquire_idx is not None or stow_idx is None:
+        rewind_mjd = Time(clean_lines[rewind_idx][:19]).mjd
+        insertions.append((rewind_idx, 0,
+                           power_line(rewind_mjd - 1./1440.,
+                                      'FEMPOWEROFF')))
+
+    # Insert against original indices from right to left, preserving the
+    # explicit STOW -> FEMPOWEROFF order for equal timestamps.
     powered_lines = list(clean_lines)
-    powered_lines.insert(acquire_idx, power_on_line)
-    if acquire_idx <= rewind_idx:
-        rewind_idx += 1
-    powered_lines.insert(rewind_idx, power_off_line)
+    for index, order, line in sorted(insertions,
+                                     key=lambda item: (item[0], item[1]),
+                                     reverse=True):
+        powered_lines.insert(index, line)
     return powered_lines
 
 def make_sched(sun=None, t=None, ax=None, verbose=False,
@@ -652,6 +711,9 @@ def remove_cal(lines, ant13_fem_power=False):
     rmidx = []
     clean_lines = []
     last_acquire = None
+    last_acquire_idx = None
+    last_stow = None
+    last_stow_idx = None
     for line in lines:
         tokens = line[20:].split()
         command = tokens[0].upper() if tokens else ''
@@ -660,7 +722,16 @@ def remove_cal(lines, ant13_fem_power=False):
         clean_lines.append(line)
         if command == 'ACQUIRE':
             last_acquire = line[:19]
+            last_acquire_idx = len(clean_lines) - 1
     lines = clean_lines
+    # Only the STOW directly before the final ACQUIRE ends the last solar
+    # scan.  An earlier STOW can belong to the morning reference calibration.
+    if last_acquire_idx is not None and last_acquire_idx > 0:
+        tokens = lines[last_acquire_idx - 1][20:].split()
+        command = tokens[0].upper() if tokens else ''
+        if command == 'STOW':
+            last_stow_idx = last_acquire_idx - 1
+            last_stow = lines[last_stow_idx][:19]
     # Keep all SUN lines and the line following. Also keep GAINSOLPNT lines;
     # these should remain even in "No 27m" mode.
     for i,line in enumerate(lines):
@@ -674,6 +745,10 @@ def remove_cal(lines, ant13_fem_power=False):
             keepidx.append(i)
         if line.find('REWIND') > 0:
             keepidx.append(i)
+    if ant13_fem_power and last_stow_idx is not None:
+        if last_stow_idx not in keepidx:
+            keepidx.append(last_stow_idx)
+            keepidx.sort()
     keepixd = np.array(keepidx)
     keeplines = np.array(lines)
     keeplines = keeplines[keepidx]
@@ -703,7 +778,13 @@ def remove_cal(lines, ant13_fem_power=False):
                 # "No 27m" mode: drop all refcal/phasecal blocks.
                 continue
         outlines.append(line)
-    if last_acquire:
+    if ant13_fem_power and last_stow:
+        # With the 27-m calibration blocks removed, the last solar STOW is
+        # the true end of observing.  Keep the terminal REWIND one minute
+        # later so the FEMPOWEROFF macro can finish before it is due.
+        rewind_mjd = Time(last_stow).mjd + 1./1440.
+        outlines[-1] = Time(rewind_mjd,format='mjd').iso[:19]+' REWIND'
+    elif last_acquire:
         rewind_delay = 1./1440. if ant13_fem_power else 0.
         rewind_mjd = Time(last_acquire).mjd + rewind_delay
         outlines[-1] = Time(rewind_mjd,format='mjd').iso[:19]+' REWIND'

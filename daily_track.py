@@ -165,7 +165,10 @@ def get_projects(t):
     # timerange is 12 UT to 12 UT on next day, relative to the day in Time() object t
     trange = Time([int(t.mjd) + 11. / 24, int(t.mjd) + 37. / 24], format='mjd')
     tstart, tend = trange.lv.astype('str')
-    cursor = db.get_cursor()
+    cnxn, cursor = db.get_cursor()
+    if cursor is None:
+        print('Could not open database cursor.')
+        return {}
     mjd = t.mjd
     # Get the project IDs for scans during the period
     verstrh = db.find_table_version(cursor, trange[0].lv, True)
@@ -499,6 +502,11 @@ def plot_pointing_tracks(trange, savefig=False, outdir="/common/webplots/ant_tra
                     ax.set_xlabel('Time [UT]')
                 if aidx == ant16_idx:
                     ax.set_ylabel(cfg['special_ylabel'])
+                # The pointing query is still usable when scan-header metadata
+                # is unavailable.  Plot the raw requested/actual series, and
+                # only mask/annotate them when project intervals exist.
+                req_data = azeldict[cfg['requested_key']][:, aidx].astype(float)
+                act_data = azeldict[cfg['actual_key']][:, aidx].astype(float)
                 if projects is not None and SOS is not None and annotation_eos_by_ant is not None:
                     eos_adj = annotation_eos_by_ant[:, aidx]
                     gm = np.zeros_like(t_plot, dtype=bool)
@@ -506,11 +514,12 @@ def plot_pointing_tracks(trange, savefig=False, outdir="/common/webplots/ant_tra
                         left = SOS[n]
                         right = eos_adj[n]
                         gm |= (t_plot >= left) & (t_plot <= right)
-                    req_data = azeldict[cfg['requested_key']][:, aidx].astype(float)
-                    act_data = azeldict[cfg['actual_key']][:, aidx].astype(float)
                     req = ma.masked_array(req_data, mask=~gm)
                     act = ma.masked_array(act_data, mask=~gm)
                     annotate_observing_intervals(ax, SOS, eos_adj, projects)
+                else:
+                    req = req_data
+                    act = act_data
                 if aidx == ant16_idx:
                     ax.plot(t_datetime, req, label=cfg['special_req_label'], linestyle='-', c='#7f7f7f', lw=5)
                     ax.plot(t_datetime, act, label=cfg['special_act_label'], linestyle='none', c='C1', marker='o', markersize=1)

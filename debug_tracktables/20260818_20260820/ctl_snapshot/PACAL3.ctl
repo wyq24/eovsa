@@ -1,0 +1,23 @@
+$SCAN-STOP
+$WAIT 2
+$PA-STOP
+DCMAUTO-OFF
+FSEQ-OFF
+FSEQ-INIT
+$SUBARRAY default.antlist phasecal
+$MK_TABLES pcal_tab #1
+FSEQ-FILE #2
+FSEQ-ON
+FEMAUTO-OFF
+FEMATTN 0
+# Set the Ant 16 FEM attenuation to fixed values for now
+HATTN 0 12 ANT16
+VATTN 0 12 ANT16
+DCMAUTO-ON ant1-16
+TRACKTABLE pcal_tab.radec
+TRACK ant1-16
+$WAIT 2
+$SCAN-START
+$WAIT 5
+FRM-SET-PA #3 ANT16
+DCMTABLE dcm.txt

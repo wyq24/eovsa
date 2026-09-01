@@ -1,0 +1,15 @@
+$SCAN-STOP
+$WAIT 2
+FSEQ-OFF
+FSEQ-INIT
+$SUBARRAY default.antlist solpntcal
+$MK_TABLES sun_tab Sun
+TRACKTABLE sun_tab.radec
+TRACK ant1-15
+FSEQ-FILE #1
+FSEQ-ON
+AGC 0
+$WAIT 2
+TRAJ-FILE solpnt_grid.trj
+TRAJ-ON
+$SCAN-START

@@ -1,0 +1,22 @@
+$SCAN-STOP
+$WAIT 2
+FSEQ-OFF
+FSEQ-INIT
+$SUBARRAY default.antlist solpntcal
+$MK_TABLES sun_tab Sun
+TRACKTABLE sun_tab.radec
+TRACK ant1-15
+FSEQ-FILE #1
+FSEQ-ON
+$MK_TRAJ solpnt Sun
+FEMATTN 0
+FEMAUTO-OFF
+$WAIT 2
+TRAJ-FILE solpnt.azel ant1-8
+TRAJ-FILE solpnt12.radec ant9-15
+$SCAN-START
+$WAIT 10
+TRAJ-ON
+FEMATTN 15
+$WAIT 10
+FEMATTN 0

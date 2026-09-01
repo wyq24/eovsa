@@ -59,3 +59,5 @@ geo.txt
 gps.txt
 ob3.txt
 scripts/deploy_eovsa_to_pipeline.sh
+
+repos/eovsa/debug_tracktables

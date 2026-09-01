@@ -1,0 +1,7 @@
+$SCAN-STOP
+RADECOFF 0 0 ant1-16
+STOW ant1-16
+$SUBARRAY default.antlist sun
+FSEQ-OFF
+DCMAUTO-OFF
+$TRIP

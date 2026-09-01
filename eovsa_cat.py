@@ -139,6 +139,38 @@ def get_cached_text(url, cache_path, max_age_hours=24.0, timeout=10, err_msg=Non
     print('Error: no data available for %s and no cache %s' % (url, cache_path))
     return []
 
+def read_cached_text(cache_path):
+    '''Read a local catalog cache without contacting the remote server.
+
+    :param cache_path: Path to the cached text file.
+    :type cache_path: str
+    :returns: Cached lines, or an empty list when the cache is unavailable.
+    :rtype: list(str)
+    '''
+    try:
+        with open(cache_path, 'r') as f:
+            return f.readlines()
+    except (IOError, OSError) as e:
+        print('Error reading local cache %s: %s' % (cache_path, e))
+        return []
+
+def schedule_uses_geosats(lines):
+    '''Return ``True`` when schedule lines require the GEO TLE catalog.
+
+    The schedule command is the third whitespace-delimited field.  Both
+    ``GEOSAT`` and ``DELAYCAL`` use the GEO TLE catalog.
+
+    :param lines: Schedule text lines.
+    :type lines: iterable(str)
+    :returns: Whether GEO satellite data is needed by the schedule.
+    :rtype: bool
+    '''
+    for line in lines:
+        fields = line.split()
+        if len(fields) > 2 and fields[2].upper() in ('GEOSAT', 'DELAYCAL'):
+            return True
+    return False
+
 def load_geosats():
     ''' Read the list of geostationary satellites from the Celestrak site and create a list
         of RadioGeosat objects containing all satellites. (List contains 399 sats as of 6/19/14.)
@@ -324,17 +356,29 @@ def load_sidereal_cats():
         srclist.append(src)
     return srclist
 
-def load_cat():
+def load_cat(include_satellites=True):
     ''' Create standard cat with Sun, Moon, all VLA calibrators (N~2000),
         all geosats from Celestrak (N~400),
         and all sidereal sources whose coords are listed in a .srclist file in the
         src_cat directory (so you can add a .srclist file there and it will automatically
         be added to the catalog created when this function is called).
-        
+
+        :param include_satellites: Include GEO, O3B, and GPS satellite sources.
+                                   Defaults to ``True`` for compatibility with
+                                   existing callers.
+        :type include_satellites: bool
+        :returns: Source catalog for EOVSA observations.
+        :rtype: aipy.amp.SrcCatalog
+
         Note: this function does not run compute yet - the catalog returned is generic to all
         Observer locations.
     '''
-    srclist = load_VLAcals() + load_geosats() + load_sidereal_cats() + load_o3bsats() + load_gpssats()
+    srclist = load_VLAcals()
+    if include_satellites:
+        srclist += load_geosats()
+    srclist += load_sidereal_cats()
+    if include_satellites:
+        srclist += load_o3bsats() + load_gpssats()
     
     # append Sun and Moon
     # use aipy.amp RadioSpecial objects and SrcCatalog object - they are extensions
@@ -346,12 +390,19 @@ def load_cat():
     cat = aipy.amp.SrcCatalog(srclist)
     return cat
 
-def eovsa_array_with_cat():
+def eovsa_array_with_cat(include_satellites=True):
     ''' Return an aa object created by the eovsa_array module but with a source
         catalog in the .cat attribute.
+
+        :param include_satellites: Include GEO, O3B, and GPS satellite sources.
+                                   Defaults to ``True`` for compatibility with
+                                   existing callers.
+        :type include_satellites: bool
+        :returns: EOVSA antenna array with a computed source catalog.
+        :rtype: aipy.phs.AntennaArray
     '''
     aa = eovsa_array()
-    cat = load_cat()
+    cat = load_cat(include_satellites=include_satellites)
     cat.compute(aa)
     aa.cat = cat
     return aa

@@ -14,7 +14,7 @@ sx.offsets2ants(offsets, ant_str='ant6 ant7 ant8 ant10 ant13')
 ## The antennas that have had tracking updated will need to be rebooted. From the Schedule Window issue the commands:
 # reboot 1 ant6-8
 
-# tracktable sun_tab.radec 1 ant6-8 track ant6-8
+# tracktable sun_tab.radec ant6-8
+# track ant6-8
 
 # The antenna pointing adjustment is typically performed once per month.
-
