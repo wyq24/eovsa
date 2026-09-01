@@ -62,6 +62,15 @@
 #    Add Ant 13 FEM power events to automatically generated solar schedules.
 #  2026-08-21  SY
 #    Power down Ant 13 during sunset-to-calibration gaps longer than 10 minutes.
+#  2026-08-31  SY
+#    Work around the Ant 3 elevation soft-limit trips at low Sun elevations:
+#    the day's first SUN scan now uses SUN_NO_ANT3 (Ant 3 left at stow), a
+#    SUN_ANT3 line joins Ant 3 to the solar track once the Sun rises above
+#    ANT3_SUN_LIMIT_DEG, and a STOW_ANT3 line parks Ant 3 in the evening
+#    when the Sun sets below the same limit.  Also taught remove_cal() to
+#    keep STOW_ANT3 lines (and the array-wide STOW they displace) and to
+#    deduplicate its kept lines.  Companion change in schedule.py classifies
+#    SUN_NO_ANT3/SUN_ANT3 scans as normal solar observing.
 #
 
 import os
@@ -76,6 +85,15 @@ def deg(rad):
 
 def deg2(rad):
     return rad * 180./np.pi
+
+# Minimum Sun elevation (deg) at which Ant 3 may track the Sun.  Ant 3's
+# pointing model currently has P7 = -5.1013 deg (elevation collimation /
+# encoder-zero term), so its elevation demand runs ~5.1 deg below the other
+# antennas and reaches the 10-deg drive soft limit while the Sun is still
+# at ~15.1 deg.  10 (soft limit) + 5.1 (P7 offset) + 0.5 (margin) = 15.6.
+# If Ant 3's pointing model is recalibrated, update this to
+# 10 - P7 + 0.5 margin.  See ovsa-ops-memo docs/reference/ant3-sun-late-start.md.
+ANT3_SUN_LIMIT_DEG = 15.6
 
 def whenup(date=None,verbose=False):
     ''' Find out the times when preferred sources are up for a given date. 
@@ -273,6 +291,48 @@ def sunup(daterange):
             'taz_rise':Time(taz_rise,format='mjd'),'teq_rise':Time(teq_rise,format='mjd'),
              'taz_set':Time(taz_set, format='mjd'), 'teq_set':Time(teq_set, format='mjd')}
 
+def sun_limit_times(t, limit_deg):
+    ''' Find the times when the Sun rises above and sets below a given
+        elevation on the day specified by t.
+
+        :param t: Date for the calculation (time of day is ignored).
+        :type t: astropy.time.Time
+        :param limit_deg: Elevation threshold in degrees.
+        :type limit_deg: float
+        :returns: Tuple (trise, tset) of Time objects at 1-min resolution,
+                  rounded to the safe side: trise is the first minute at or
+                  above limit_deg on the rising branch, tset the last minute
+                  at or above limit_deg before the following setting branch
+                  (tset can fall after 24 UT, i.e. on the next MJD).  Either
+                  element is None if no such crossing is found.
+        :rtype: tuple
+    '''
+    mjd = int(t.mjd)
+    # Add times in 1-min steps for 48 h, to catch summer settings after 0 UT
+    # on the next MJD
+    ts = Time(mjd,format='mjd') + TimeDelta(np.arange(0.,48.,1./60.)/24.,format='jd')
+
+    aa = eovsa_cat.eovsa_array()
+    nt = len(ts)
+    alt = np.zeros(nt)
+    for i in range(nt):
+        aa.set_jultime(ts[i].jd)
+        src = aa.cat['Sun']
+        src.compute(aa)
+        alt[i] = src.alt
+
+    alt = deg2(alt)
+    above = alt >= limit_deg
+    up, = np.where(np.logical_and(np.logical_not(above[:-1]), above[1:]))
+    dn, = np.where(np.logical_and(above[:-1], np.logical_not(above[1:])))
+    if len(up) == 0:
+        return None, None
+    irise = up[0] + 1          # first minute at or above the limit
+    dn = dn[dn >= irise]       # setting crossing paired with that rise
+    if len(dn) == 0:
+        return ts[irise], None
+    return ts[irise], ts[dn[0]]   # dn[0] = last minute at or above the limit
+
 
 def plot_sun(sun):
     ''' Plot the output of sunup() in a nice format for visualizing the
@@ -430,7 +490,7 @@ def add_ant13_fem_power_events(lines):
     return powered_lines
 
 def make_sched(sun=None, t=None, ax=None, verbose=False,
-               ant13_fem_power=False):
+               ant13_fem_power=False, ant3_late=True, ant3_sun_limit=None):
     '''Create a daily solar schedule for a specified date.
 
     :param sun: A dictionary returned by :func:`sunup` whose date range
@@ -446,6 +506,14 @@ def make_sched(sun=None, t=None, ax=None, verbose=False,
                             events.  This defaults to ``False`` so other
                             callers do not acquire shared hardware ownership.
     :type ant13_fem_power: bool
+    :param ant3_late: When True (default), the first SUN scan of the day
+                      excludes Ant 3 (macro SUN_NO_ANT3), a SUN_ANT3 line is
+                      added once the Sun rises above ant3_sun_limit, and a
+                      STOW_ANT3 line is added when the Sun sets below it.
+    :type ant3_late: bool
+    :param ant3_sun_limit: Sun elevation threshold in degrees for Ant 3
+                           tracking; defaults to ANT3_SUN_LIMIT_DEG.
+    :type ant3_sun_limit: float or None
     :returns: Text lines representing the generated schedule.
     :rtype: list(str)
     '''
@@ -458,6 +526,8 @@ def make_sched(sun=None, t=None, ax=None, verbose=False,
     # If no sun dictionary is give, create a 2-day one
     if sun is None:
         sun = sunup(Time([t.mjd,t.mjd+1],format='mjd'))
+    if ant3_sun_limit is None:
+        ant3_sun_limit = ANT3_SUN_LIMIT_DEG
     # Calibration durations, minutes
     refdur = 84.
     caldur = 20.  #35.
@@ -511,8 +581,23 @@ def make_sched(sun=None, t=None, ax=None, verbose=False,
     if rc1end != sunrise:
         lines.append('{:} {:}'.format(Time(imjd + rc1start + 85./1440.,format='mjd').iso[:19],'STOW'))
         if verbose: print Time(imjd + rc1start + 85./1440.,format='mjd').iso[:19],'STOW'
-    lines.append('{:} {:}'.format(Time(imjd + sunrise,format='mjd').iso[:19],'SUN'))
-    if verbose: print Time(imjd + sunrise,format='mjd').iso[:19],'SUN'
+    if ant3_late:
+        sun1cmd = 'SUN_NO_ANT3'
+    else:
+        sun1cmd = 'SUN'
+    lines.append('{:} {:}'.format(Time(imjd + sunrise,format='mjd').iso[:19],sun1cmd))
+    isun1 = len(lines) - 1
+    if verbose: print Time(imjd + sunrise,format='mjd').iso[:19],sun1cmd
+    ant3rise = None
+    ant3set = None
+    if ant3_late:
+        t3rise, t3set = sun_limit_times(Time(imjd,format='mjd'), ant3_sun_limit)
+        if t3rise is not None:
+            # Never earlier than 1 min after the (Black-Mountain-adjusted) sunrise line
+            ant3rise = max(t3rise.mjd % 1, sunrise + 1./1440.)
+        if t3set is not None:
+            ant3set = t3set.mjd % 1
+            if ant3set < 0.5: ant3set += 1.0
     if ax:
         ax.plot([rc1start,rc1start+refdur/1440.],[imjd,imjd],color='C0',alpha=0.25)
     #   Phasecals
@@ -639,12 +724,24 @@ def make_sched(sun=None, t=None, ax=None, verbose=False,
             ax.plot([pc1start,pc1start+caldur/1440.],[imjd,imjd],color='C0',alpha=0.25)
             ax.plot([pc2start,pc2start+caldur/1440.],[imjd,imjd],color='C0',alpha=0.25)
             ax.plot([pc3start,pc3start+caldur/1440.],[imjd,imjd],color='C0',alpha=0.25)
+    if ant3_late and ant3rise is not None:
+        # Insert the Ant 3 join line just after the first SUN line, unless the
+        # Sun reaches the Ant 3 limit only around/after the first phasecal
+        # block, in which case Ant 3 simply joins at that block's normal SUN.
+        if ant3rise < pc1start - 2./1440.:
+            lines.insert(isun1 + 1, '{:} {:}'.format(Time(imjd + ant3rise,format='mjd').iso[:19],'SUN_ANT3'))
+            if verbose: print Time(imjd + ant3rise,format='mjd').iso[:19],'SUN_ANT3'
     #   Evening refcal
     refcal2 = refcalsrcs[1][np.where(iday - np.array(refcaltrans[1]) >= 0.0)[0][-1]]
     refrise = (ts[refcal2]-nday*0.0027378 + 1.0) % 1
     if refrise < 0.5: refrise += 1.0
     sunset = sun['taz_set'][nday].mjd % 1
     if sunset < 0.5: sunset += 1.0
+    if ant3_late and ant3set is not None:
+        # Park Ant 3 before its elevation demand falls below the soft limit.
+        ant3set = min(ant3set, sunset - 1./1440.)
+        lines.append('{:} {:}'.format(Time(imjd + ant3set,format='mjd').iso[:19],'STOW_ANT3'))
+        if verbose: print Time(imjd + ant3set,format='mjd').iso[:19],'STOW_ANT3'
     rc2start = max(refrise,sunset)
 #        rc2end = rc2start + refdur/1440.
     if refrise > sunset:
@@ -733,9 +830,14 @@ def remove_cal(lines, ant13_fem_power=False):
             last_stow_idx = last_acquire_idx - 1
             last_stow = lines[last_stow_idx][:19]
     # Keep all SUN lines and the line following. Also keep GAINSOLPNT lines;
-    # these should remain even in "No 27m" mode.
+    # these should remain even in "No 27m" mode.  A STOW_ANT3 line (Ant 3
+    # early stow) is kept along with the line following it, since it displaces
+    # the array-wide STOW from the line-after-SUN position.
     for i,line in enumerate(lines):
         if line.find('SUN') > 0:
+            keepidx.append(i)
+            keepidx.append(i+1)
+        if line.find('STOW_ANT3') > 0:
             keepidx.append(i)
             keepidx.append(i+1)
         if line.find('GAINSOLPNT') > 0:
@@ -749,7 +851,9 @@ def remove_cal(lines, ant13_fem_power=False):
         if last_stow_idx not in keepidx:
             keepidx.append(last_stow_idx)
             keepidx.sort()
-    keepixd = np.array(keepidx)
+    # Deduplicate while preserving chronological order (e.g. a SUN_ANT3 line
+    # matches the SUN rule and is also the line following SUN_NO_ANT3).
+    keepidx = sorted(set(keepidx))
     keeplines = np.array(lines)
     keeplines = keeplines[keepidx]
     

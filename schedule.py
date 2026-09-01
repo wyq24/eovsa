@@ -416,6 +416,11 @@
 #    2026-Jul-20 SY
 #       Added state-aware Ant 13 FEM power control, nightly default-schedule
 #       power events, and a five-minute morning communication check.
+#    2026-Aug-31 SY
+#       Recognize the Ant 3 late-start solar macros (SUN_NO_ANT3, SUN_ANT3)
+#       as solar scans, so scan headers keep project NormalObserving, source
+#       Sun and track mode PLANET, and so midday-phasecal detection still
+#       sees them as SUN lines.
 
 
 import os, signal
@@ -1230,7 +1235,7 @@ class App():
                 prev_tokens = self.L.get(j)[20:].split()
             except TclError:
                 continue
-            if prev_tokens and prev_tokens[0].upper() == 'SUN':
+            if prev_tokens and prev_tokens[0].upper() in ('SUN', 'SUN_NO_ANT3', 'SUN_ANT3'):
                 prev_sun_idx = j
                 break
         if prev_sun_idx is None:
@@ -1243,7 +1248,7 @@ class App():
                 continue
             if not next_tokens:
                 continue
-            if next_tokens[0].upper() == 'SUN':
+            if next_tokens[0].upper() in ('SUN', 'SUN_NO_ANT3', 'SUN_ANT3'):
                 return True
             break
         return close_to_nominal
@@ -2829,7 +2834,7 @@ class App():
             macro_lines = []
         self.L2.delete(0,END)
         # Current options for source ID
-        if cmds[0].upper() == 'SUN': 
+        if cmds[0].upper() in ('SUN', 'SUN_NO_ANT3', 'SUN_ANT3'):
             sh_dict['project'] = 'NormalObserving'
             sh_dict['source_id'] = 'Sun'
             sh_dict['track_mode'] = 'PLANET'

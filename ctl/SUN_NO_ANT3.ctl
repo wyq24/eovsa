@@ -1,0 +1,18 @@
+$SCAN-STOP
+$WAIT 2
+FLUSH ant16
+FSEQ-OFF
+FSEQ-INIT
+DCMAUTO-OFF
+$SUBARRAY default.antlist sun
+$MK_TABLES sun_tab Sun
+TRACKTABLE sun_tab.radec ant1-2 ant4-15
+TRACK ant1-2 ant4-15
+FSEQ-FILE solar.fsq
+FSEQ-ON
+STOW ant3
+STOW ant16
+DCMAUTO-ON
+AGC 0
+$WAIT 5
+$SCAN-START
