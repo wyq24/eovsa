@@ -463,6 +463,10 @@ from schedule_status import load_executed_lines, write_schedule_status
 ANT13_FEM_ALERT_RECIPIENT = 'sijie.yu@njit.edu'
 ANT13_FEM_WARMUP_SECONDS = 300
 ANT13_SUBARRAY_STATE_MAX_AGE = 10
+# Phase three can disable only the high-volume legacy stateframe insert.  Keep
+# the default enabled so existing scheduler deployments retain their behavior.
+DISABLE_FBIN = os.environ.get('EOVSA_DISABLE_FBIN', '').strip().lower() in (
+    '1', 'true', 'yes', 'on')
 SCHEDULE_STATUS_FILE = '/common/webplots/status.txt'
 SCHEDULE_SKIP_STATE_FILE = '/common/webplots/skip_phacal_status.json'
 ANT13_FEM_BUILTIN_COMMANDS = {
@@ -2481,7 +2485,7 @@ class App():
                 
         # ************ This block commented out due to loss of SQL **************
         # If we are connected to the SQL database, send converted stateframe (only master schedule is connected)
-        if msg == 'No Error' and self.sql['cnxn']:
+        if msg == 'No Error' and self.sql['cnxn'] and not DISABLE_FBIN:
             #self.sql['cursor'].execute('set implicit_transactions off')
             bufout = stateframedef.transmogrify(data, self.sql['sfbrange'])
             try:
