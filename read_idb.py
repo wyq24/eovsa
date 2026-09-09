@@ -947,10 +947,10 @@ def get_trange_files(trange):
     # Get path to root of IDB data
     datadir = get_idbdir(trange[0])
 
-    # Add date path if on pipeline
+    # Add date path on processing hosts with the per-day IDB layout
     import socket
-    host = socket.gethostname()
-    if host == 'pipeline': datadir += fstr.replace('-','').split()[0]+'/'
+    host = socket.gethostname().split('.')[0]
+    if host in ('pipeline', 'inti'): datadir += fstr.replace('-','').split()[0]+'/'
     # if datadir.find('eovsa') != -1: datadir += fstr.replace('-','').split()[0]+'/'
     folder=datadir
     try:

@@ -32,6 +32,21 @@
 #  2025-May-21  DG
 #    Changes to work with 16 antennas.  It is mainly just a larger plot with more
 #    antennas.
+#  2026-Sep-03  SY
+#    Fix pcal_anal() so that a scan spanning several IDB files is re-processed
+#    once all of its files are complete.  findfile() marks the last file of a
+#    scan "undone" until 10 min after the scan ends, so the "active scan" pass
+#    wrote the NPZ/PNG products from the files closed so far, and the later
+#    "completed scan" pass then skipped the scan because the pcT*.png plot
+#    already existed.  The last IDB file of every multi-file scan (half of a
+#    20-min PHASECAL_LO scan) therefore never made it into the NPZ.  graph()
+#    now writes a pcL<time>_<source>.txt marker listing the IDB files it used,
+#    and the completed-scan pass re-runs graph() unless the marker already
+#    covers every file of the scan.  Also fixed findfile() to index the
+#    in-range scans directly; it assumed all out-of-range scans came before
+#    the in-range ones, which returned the wrong scans for a timerange that
+#    ends before a later scan on the same day (the cron, whose range ends
+#    at "now", was not affected).
 #
 
 import numpy as np
@@ -137,26 +152,24 @@ def findfile(trange):
         # Key 'ST_SEC' not found so just continue (this happens on pipeline when IFDB file is used)
         pass
         
-    k = 0         # Number of scans within timerange
-    m = 0         # Pointer to first scan within timerange
     flist = []
     status = []
     tstlist = []
-    for i in range(len(tslist)):
-        if tslist[i].jd >= trange[0].jd and telist[i].jd <= trange[1].jd:
-            # Time is in range, so add it
-            k += 1
-        else:
-            # Time is too early, so skip it
-            m += 1
-        
-    if k == 0: 
+    # Indexes of the scans that fall entirely within the timerange.  (An
+    # earlier version counted the out-of-range scans and assumed they all
+    # preceded the in-range ones, which picked the wrong scans whenever the
+    # end of the timerange was earlier than a later scan on the same day.)
+    inrange = [i for i in range(len(tslist))
+                 if tslist[i].jd >= trange[0].jd and telist[i].jd <= trange[1].jd]
+    k = len(inrange)  # Number of scans within timerange
+
+    if k == 0:
         print 'No phase calibration data within given time range'
         return None
-    else: 
+    else:
         print 'Found',k,'scans in timerange.'
-        for i in range(k):
-            f1 = fdb['FILE'][np.where(fdb['SCANID'] == scans[m+i])].astype('str')
+        for i in inrange:
+            f1 = fdb['FILE'][np.where(fdb['SCANID'] == scans[i])].astype('str')
             # if fpath == '/data1/eovsa/fits/IDB/':
             #     f2 = [fpath + f[3:11] + '/' + f for f in f1]
             # else:
@@ -166,8 +179,8 @@ def findfile(trange):
             else:
                 f2 = [fpath + f[3:11] + '/' + f for f in f1]
             flist.append(f2)
-            tstlist.append(tslist[m+i])
-            ted = telist[m+i]
+            tstlist.append(tslist[i])
+            ted = telist[i]
             # Mark all files done except possibly the last
             fstatus = ['done']*len(f1)
             # Check if last file end time is less than 10 min ago
@@ -182,7 +195,7 @@ def graph(f,navg=None,path=None):
 
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FormatStrFormatter
-    import struct, time, glob, sys, socket
+    import struct, time, glob, sys, socket, os
     import read_idb as ri
     import dbutil as db
 
@@ -237,6 +250,12 @@ def graph(f,navg=None,path=None):
     s = out['source']
     ofile = path + t[:14] +'_'+ s +'.npz'
     np.savez(open(ofile,'wb'),out = out)
+    # Record which IDB files went into this product, so that pcal_anal() can
+    # tell a partial (active-scan) product from a complete one.
+    mfile = path + 'pcL' + t[:14] +'_'+ s +'.txt'
+    fh = open(mfile,'w')
+    fh.write('\n'.join([os.path.basename(str(fn)) for fn in f]) + '\n')
+    fh.close()
     plt.savefig(path + 'pcT'+t+'_'+ s +'.png',bbox_inches='tight')
     plt.close(fig)
 
@@ -270,6 +289,20 @@ def graph(f,navg=None,path=None):
     plt.close(fig)
 
     
+def find_markers(path,first_file):
+    ''' Return the pcL*.txt marker files written by graph() for the scan whose
+        first IDB file is first_file.  The marker name carries the time of the
+        first averaged sample, which can fall in the minute after the file
+        time, so look at the file's minute and one minute either side of it.
+    '''
+    import glob
+    tmark = fname2mjd(first_file)
+    markers = []
+    for t in (tmark - one_minute, tmark, tmark + one_minute):
+        tstr = Time(t,format='mjd').iso.replace('-','').replace(':','').replace(' ','')[:12]
+        markers += glob.glob(path + 'pcL' + tstr + '*.txt')
+    return markers
+
 def pcal_anal(trange,path=None):
 
     import os
@@ -293,30 +326,27 @@ def pcal_anal(trange,path=None):
         good, = np.where(np.array(statuslist[i]) == 'done')
         flist = np.array(filelist[i])[good].tolist()   # List of "done" files
         first_file = filelist[i][0]
-        last_file = filelist[i][-1]
-        mjd = fname2mjd(last_file)
-        tdif = Time.now().mjd - mjd
-        if len(good) == len(filelist[i]) and tdif > ten_minutes:
-            # All files in this scan are marked "done", so process the scan only if the plots do not already exist
-            tmark = fname2mjd(first_file)
-            tmarkp = tmark+one_minute
-            tmarkn = tmark-one_minute
-            tmark = Time(tmark,format='mjd').iso.replace('-','').replace(':','').replace(' ','')[:12]
-            tmarkp = Time(tmarkp,format='mjd').iso.replace('-','').replace(':','').replace(' ','')[:12]
-            tmarkn = Time(tmarkn,format='mjd').iso.replace('-','').replace(':','').replace(' ','')[:12]
-            f1 = glob.glob(path + 'pcT*'+tmark+'*.png')
-            f2 = glob.glob(path + 'pcT*'+tmarkp+'*.png')
-            f3 = glob.glob(path + 'pcT*'+tmarkn+'*.png')
-            if f1 == [] and f2 == [] and f3 == []:
-                #print 'No files:',tmarkn,tmark,tmarkp,'found.'
-                print 'Processing completed scan',i+1
-                graph(filelist[i],path=path)
-            else:
+        if len(good) == len(filelist[i]):
+            # All files in this scan are marked "done" (findfile() only marks
+            # the last file done 10 min after the scan ends).  Process the scan
+            # unless an earlier pass already made products from ALL of its
+            # files.  The "active scan" pass below writes products from the
+            # files closed at the time, so the existence of the plots is not
+            # proof that the scan is complete; instead compare the scan's file
+            # list with the pcL*.txt marker(s) written by graph().
+            wanted = set([os.path.basename(str(fn)) for fn in filelist[i]])
+            have = set()
+            for mfile in find_markers(path,first_file):
+                try:
+                    have |= set(open(mfile).read().split())
+                except IOError:
+                    pass
+            missing = wanted - have
+            if not missing:
                 print 'Scan processing already complete.  Skipping scan',i+1
-        elif len(good) == len(filelist[i]) and tdif < ten_minutes:
-            # All files in this scan are marked "done", but it has been less than 10 min, so process the scan
-            print 'Processing completed scan',i+1
-            graph(flist,path=path)        
+            else:
+                print 'Processing completed scan',i+1,'(',len(missing),'of',len(wanted),'files not yet in the products)'
+                graph(filelist[i],path=path)
         elif len(good) == len(filelist[i])-1:
             # This scan is still active, so process all files up to this point.
             print 'Processing active scan',i+1

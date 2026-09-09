@@ -423,7 +423,7 @@
 #       sees them as SUN lines.
 
 
-import os, signal
+import os, signal, re
 os.chdir('/home/sched/Dropbox/PythonCode/Current')
 from Tkinter import *
 import ttk
@@ -446,7 +446,7 @@ from scan_header import scan_header
 from gen_schedule_sf import *
 import stateframe, stateframedef
 from aipy.phs import PointingError
-import corr, time, numpy, socket, struct, sys
+import corr, time, numpy, socket, struct, sys, json
 import ephem
 import eovsa_cat
 from eovsa_visibility import scan_visible
@@ -458,11 +458,16 @@ import adc_cal2
 import pcapture2
 from whenup import make_sched, remove_cal
 from schedule_status import load_executed_lines, write_schedule_status
+from phasecal_wind import evaluate_wind, evaluate_controller_clocks
 
 
 ANT13_FEM_ALERT_RECIPIENT = 'sijie.yu@njit.edu'
 ANT13_FEM_WARMUP_SECONDS = 300
 ANT13_SUBARRAY_STATE_MAX_AGE = 10
+AUTO_WIND_SKIP_DEFAULT = True
+AUTO_WIND_SKIP_STALE_SECONDS = 300.0
+AUTO_WIND_ACC_STALE_SECONDS = 30.0
+AUTO_WIND_CONTROLLER_GRACE_SECONDS = 5.0
 # Phase three can disable only the high-volume legacy stateframe insert.  Keep
 # the default enabled so existing scheduler deployments retain their behavior.
 DISABLE_FBIN = os.environ.get('EOVSA_DISABLE_FBIN', '').strip().lower() in (
@@ -785,6 +790,7 @@ def mjd(line=None):
 
 #============================
 def get_antlist(key='sun',filename='default.antlist'):
+    """Return the named antlist from ``filename``."""
     # antlist = get_antlist(key='sun',filename='default.antlist')
     #
     # Load filename into a dictionary of format {antlistname: antlist}
@@ -808,6 +814,67 @@ def get_antlist(key='sun',filename='default.antlist'):
     except:
         print('Warning: get_antlist() could not find an antlist of name', key, 'in file', filename + '. In this case get_antlist() returns an empty string.')
         return ''
+
+
+_SUBARRAY_ANT_TOKEN = re.compile(
+    r'^ant([1-9]|1[0-6])(?:-([1-9]|1[0-6]))?$', re.IGNORECASE)
+
+
+def _parse_subarray_ant_tokens(tokens, label):
+    """Validate antenna tokens and return their zero-based util indices."""
+    expanded = ' '.join(tokens).replace(',', ' ').split()
+    if len(expanded) == 0:
+        raise ValueError('$SUBARRAY: missing ' + label + ' antennas')
+    for token in expanded:
+        match = _SUBARRAY_ANT_TOKEN.match(token)
+        if match is None:
+            raise ValueError('$SUBARRAY: invalid ' + label + ' token ' + token)
+        first = int(match.group(1))
+        last = int(match.group(2) or match.group(1))
+        if last < first:
+            raise ValueError('$SUBARRAY: descending ' + label + ' range ' + token)
+    parsed = util.ant_str2list(' '.join(expanded))
+    if parsed is None:
+        raise ValueError('$SUBARRAY: invalid ' + label + ' antenna list')
+    return list(parsed)
+
+
+def _subarray_exclude(base_tokens, excluded_tokens):
+    base = _parse_subarray_ant_tokens(base_tokens, 'antlist')
+    excluded = set(_parse_subarray_ant_tokens(excluded_tokens, 'exclude'))
+    remaining = [index for index in base if index not in excluded]
+    if len(remaining) == 0:
+        raise ValueError('$SUBARRAY: exclusion leaves an empty antlist')
+    return ' '.join('ant' + str(index + 1) for index in remaining)
+
+
+def resolve_subarray_args(args):
+    """Resolve ``file.antlist name [exclude ant...]`` or raise ValueError."""
+    if len(args) == 0:
+        raise ValueError('$SUBARRAY: missing antlist')
+    if args[0].lower().endswith('.antlist'):
+        if len(args) < 2:
+            raise ValueError('$SUBARRAY: missing antlist name')
+        try:
+            antlist = get_antlist(args[1], args[0])
+        except (IOError, OSError):
+            raise ValueError('$SUBARRAY: cannot read antlist file ' + args[0])
+        if antlist == '':
+            raise ValueError('$SUBARRAY: antlist name not in ' + args[0])
+        extra = args[2:]
+        if len(extra) == 0:
+            return antlist
+        if extra[0].lower() != 'exclude':
+            raise ValueError('$SUBARRAY: unknown argument ' + extra[0])
+        return _subarray_exclude(antlist.split(), extra[1:])
+    exclude_index = [i for i, token in enumerate(args)
+                     if token.lower() == 'exclude']
+    if len(exclude_index) > 1:
+        raise ValueError('$SUBARRAY: multiple exclude clauses')
+    if len(exclude_index) == 0:
+        return ' '.join(args)
+    exclude_index = exclude_index[0]
+    return _subarray_exclude(args[:exclude_index], args[exclude_index + 1:])
 
 #============================
 class App():
@@ -899,6 +966,19 @@ class App():
                       'Skip midday ACQUIRE/PHASECAL pairs bracketed by Sun scans. '
                       'Dawn/dusk refcals plus SOLPNTCAL and GAINSOLPNT remain unchanged.')
 
+        self.auto_wind_skip = BooleanVar()
+        self.auto_wind_skip.set(AUTO_WIND_SKIP_DEFAULT)
+        self.auto_wind_skip_btn = Checkbutton(
+            timeframe, text="Auto Wind", variable=self.auto_wind_skip,
+            command=self.on_auto_wind_skip_toggle)
+        self.auto_wind_skip_btn.pack(side=LEFT, expand=0, fill=BOTH)
+        SimpleToolTip(
+            self.auto_wind_skip_btn,
+            'At each daytime phasecal ACQUIRE, skip the pair when Ant 16 '
+            'controller is unavailable or wind telemetry is unsafe; missing '
+            'weather alone assumes normal wind. Return to Sun if confirmed '
+            'unsafe wind appears during the pair.')
+
         self.menu = Menu(self.root)
 
         filemenu = Menu(self.menu, tearoff = 0)
@@ -983,6 +1063,16 @@ class App():
         self.L2.config( yscrollcommand = self.S2.set)
 
         self.skip_phacal_indices = set()
+        self.auto_wind_skip_indices = set()
+        self.auto_wind_decisions = {}
+        self.auto_wind_recovery = {}
+        self.auto_wind_controller_health = {
+            'last_root_timestamp': None,
+            'last_healthy_mjd': None,
+            'last_check_mjd': None,
+            'last_result': None,
+            'seen_frame': False,
+        }
         self.executed_skip_phacal_indices = set()
         self.executed_skip_phacal_lines = []
 
@@ -1105,6 +1195,10 @@ class App():
         self.PAthread = None
         self.wlimit = 17  # Default wind limit (mph) for 27-m antenna
         self.stale = True # Default status of weather station information (will be immediately set to False if not stale)
+        print('AUTO_WIND_SKIP initialized enabled=%s recovery=True '
+              'telemetry_policy=separate_v2 PID=%s' %
+              (self.auto_wind_skip.get(), self.mypid))
+        sys.stdout.flush()
         self.ant13_fem_ready_deadline = None
         self.ant13_in_subarray2 = None
         self.ant13_subarray_state_time = None
@@ -1150,11 +1244,67 @@ class App():
             if remaining.get(line, 0) > 0:
                 self.executed_skip_phacal_indices.add(idx)
                 remaining[line] -= 1
+        # The sidecar records the exact rows that were skipped, so rebuild the
+        # automatic latch before the scheduler can resume in the middle of a
+        # skipped pair.  Matching both rows keeps an unrelated row edit from
+        # reviving a previously skipped pair.
+        self._restore_auto_wind_skip_state()
+
+    #============================
+    def _restore_auto_wind_skip_state(self):
+        if not hasattr(self, 'auto_wind_skip_indices'):
+            self.auto_wind_skip_indices = set()
+        if not hasattr(self, 'auto_wind_decisions'):
+            self.auto_wind_decisions = {}
+        lines = self._schedule_lines()
+        remaining = {}
+        for line in self.executed_skip_phacal_lines:
+            remaining[line] = remaining.get(line, 0) + 1
+        for phase_idx in range(len(lines)):
+            if not self._is_midday_phacal(phase_idx):
+                continue
+            acq_idx = phase_idx - 1
+            key = self._auto_wind_pair_key(phase_idx)
+            acq_line, phase_line = key
+            if (remaining.get(acq_line, 0) <= 0 or
+                    remaining.get(phase_line, 0) <= 0):
+                continue
+            self.auto_wind_skip_indices.update((acq_idx, phase_idx))
+            self.auto_wind_decisions.setdefault(key, {
+                'skip': True,
+                'reason': 'restored prior phasecal skip',
+                'wind_mph': None,
+                'wind_limit_mph': getattr(self, 'wlimit', 17),
+                'sample_time': None,
+                'sample_age_seconds': None,
+                'scram_state': None,
+                'scram_comm_err': None,
+            })
+            remaining[acq_line] -= 1
+            remaining[phase_line] -= 1
 
     #============================
     def _clear_skip_phacal_state(self):
         self.executed_skip_phacal_indices = set()
         self.executed_skip_phacal_lines = []
+
+    #============================
+    def _clear_auto_wind_skip_state(self):
+        self.auto_wind_skip_indices = set()
+        self.auto_wind_decisions = {}
+
+    #============================
+    def _clear_auto_wind_recovery_state(self):
+        self.auto_wind_recovery = {}
+
+    #============================
+    def _recovery_override(self):
+        if not getattr(self, 'auto_wind_recovery', None):
+            return None
+        try:
+            return self.auto_wind_recovery.get(self.L.get(self.curline))
+        except (IndexError, TclError):
+            return None
 
     #============================
     def _record_skip_phacal_line(self, idx):
@@ -1165,11 +1315,12 @@ class App():
 
     #============================
     def _planned_skip_phacal_indices(self):
-        if not self.skip_phacal.get():
-            return set()
         now = mjd()
         planned = set()
-        for idx in self.skip_phacal_indices:
+        indices = set(self.auto_wind_skip_indices)
+        if self.skip_phacal.get():
+            indices.update(self.skip_phacal_indices)
+        for idx in indices:
             if idx >= self.L.size():
                 continue
             if mjd(self.L.get(idx)) > now:
@@ -1195,10 +1346,17 @@ class App():
                             line = self.L.get(idx)
                         except TclError:
                             continue
-                        if mjd(line) > now:
+                        if (mjd(line) > now and
+                                idx not in self.auto_wind_skip_indices):
                             self.status.delete(idx)
                             self.status.insert(idx,'Waiting...')
             self._apply_skip_phacal_styling()
+        self.update_status()
+
+    #============================
+    def on_auto_wind_skip_toggle(self):
+        self._apply_skip_phacal_styling()
+        self._ensure_current_line_valid()
         self.update_status()
 
     #============================
@@ -1223,15 +1381,6 @@ class App():
             return False
         if not prev_tokens or prev_tokens[0].upper() != 'ACQUIRE':
             return False
-        try:
-            mjd_ph = mjd(line)
-        except Exception:
-            return False
-        ut_hours = (mjd_ph % 1) * 24.0
-        nominal_midday = [17. + 10./60., 22. + 10./60.]
-        # Allow up to 45 minutes deviation from nominal midday times
-        close_to_nominal = any(abs(ut_hours - t) <= 0.75 for t in nominal_midday)
-
         # Require the pair to be bracketed by SUN commands
         prev_sun_idx = None
         for j in range(idx-2, -1, -1):
@@ -1239,6 +1388,10 @@ class App():
                 prev_tokens = self.L.get(j)[20:].split()
             except TclError:
                 continue
+            if (prev_tokens and prev_tokens[0].upper() in
+                    ('STOW', 'STOW_ANT3', 'TRACKSTOW', 'REWIND',
+                     'FEMPOWERON', 'FEMPOWEROFF')):
+                break
             if prev_tokens and prev_tokens[0].upper() in ('SUN', 'SUN_NO_ANT3', 'SUN_ANT3'):
                 prev_sun_idx = j
                 break
@@ -1255,7 +1408,482 @@ class App():
             if next_tokens[0].upper() in ('SUN', 'SUN_NO_ANT3', 'SUN_ANT3'):
                 return True
             break
-        return close_to_nominal
+        return False
+
+    #============================
+    def _active_skip_indices(self):
+        indices = set(self.auto_wind_skip_indices)
+        if self.skip_phacal.get():
+            indices.update(self.skip_phacal_indices)
+        return indices
+
+    #============================
+    def _phasecal_pair_index(self, acq_idx):
+        phase_idx = acq_idx + 1
+        if phase_idx >= getattr(self, 'lastline', self.L.size()):
+            return None
+        if self._is_midday_phacal(phase_idx):
+            return phase_idx
+        return None
+
+    #============================
+    def _auto_wind_pair_key(self, phase_idx):
+        """Return the exact schedule-row identity for a daytime pair."""
+        return (self.L.get(phase_idx - 1), self.L.get(phase_idx))
+
+    #============================
+    def _refresh_auto_wind_skip_indices(self):
+        if not hasattr(self, 'L'):
+            self.auto_wind_skip_indices = set()
+            return
+        old_indices = set(self.auto_wind_skip_indices)
+        new_indices = set()
+        total = getattr(self, 'lastline', self.L.size())
+        for idx in range(total):
+            if not self._is_midday_phacal(idx):
+                continue
+            key = self._auto_wind_pair_key(idx)
+            decision = self.auto_wind_decisions.get(key)
+            if decision and decision.get('skip'):
+                new_indices.add(idx)
+                new_indices.add(idx - 1)
+        self.auto_wind_skip_indices = new_indices
+        for idx in old_indices - new_indices:
+            if (idx < self.L.size() and idx not in self.skip_phacal_indices):
+                try:
+                    if self.L.itemcget(idx, 'background') == 'light gray':
+                        self.L.itemconfig(idx, background='white')
+                    if idx < self.status.size() and self.status.get(idx) == 'Skipped':
+                        if mjd(self.L.get(idx)) > mjd():
+                            self.status.delete(idx)
+                            self.status.insert(idx, 'Waiting...')
+                except TclError:
+                    pass
+        # Re-export any still-latched rows after an insertion/removal changed
+        # their numeric indices.  The sidecar is keyed by the current exact
+        # schedule rows, so a reload cannot revive a pair midway through.
+        for idx in new_indices:
+            self._record_skip_phacal_line(idx)
+
+    #============================
+    def _ant16_in_spec(self, spec):
+        try:
+            if not spec or not spec.strip():
+                return None
+            antlist = util.ant_str2list(spec.lower())
+            if antlist is None:
+                return None
+            return 15 in antlist
+        except Exception:
+            return None
+
+    #============================
+    def _phasecal_uses_ant16(self, phase_idx):
+        """Return whether the phasecal macro assigns Ant 16 to the scan."""
+        try:
+            cmds = self.L.get(phase_idx)[20:].split()
+            macro_lines = _read_macro_commands(cmds)
+        except Exception:
+            return None
+        found_subarray = False
+        for raw_line in macro_lines:
+            tokens = raw_line.strip().split()
+            if not tokens:
+                continue
+            command = tokens[0].upper()
+            if command in ('$SUBARRAY', 'SUBARRAY'):
+                found_subarray = True
+                args = tokens[1:]
+                try:
+                    spec = resolve_subarray_args(args)
+                except (IOError, ValueError):
+                    return None
+                ant16 = self._ant16_in_spec(spec)
+                if ant16 is None:
+                    return None
+                return ant16
+        if not found_subarray:
+            return None
+        return False
+
+    #============================
+    def _update_auto_wind_controller_health(self, now, data, msg):
+        """Record Ant16 controller health from each new, fresh ACC frame."""
+        health = getattr(self, 'auto_wind_controller_health', None)
+        if health is None:
+            health = {
+                'last_root_timestamp': None,
+                'last_healthy_mjd': None,
+                'last_check_mjd': None,
+                'last_result': None,
+                'seen_frame': False,
+            }
+            self.auto_wind_controller_health = health
+        if msg != 'No Error' or data is None:
+            return
+        try:
+            root_timestamp = stateframe.extract(
+                data, self.accini['sf']['Timestamp'])
+            root_timestamp = float(root_timestamp)
+            acc_age = float(now.lv) - root_timestamp
+        except Exception:
+            return
+        if (not numpy.isfinite(root_timestamp) or
+                not numpy.isfinite(acc_age) or acc_age < 0.0 or
+                acc_age > AUTO_WIND_ACC_STALE_SECONDS):
+            health['seen_frame'] = True
+            health['last_result'] = {
+                'available': False,
+                'reason': 'ACC stateframe stale',
+                'acc_age_seconds': acc_age,
+                'crio_age_seconds': None,
+                'system_age_seconds': None,
+            }
+            return
+        health['seen_frame'] = True
+        previous_root = health.get('last_root_timestamp')
+        if (previous_root is not None and root_timestamp <= previous_root):
+            return
+        health['last_root_timestamp'] = root_timestamp
+        try:
+            controller = self.accini['sf']['Antenna'][15]['Controller']
+            result = evaluate_controller_clocks(
+                now.mjd - acc_age / 86400.,
+                stateframe.extract(data, controller['cRIOClockms']),
+                stateframe.extract(data, controller['SystemClockMJDay']),
+                stateframe.extract(data, controller['SystemClockms']))
+        except Exception:
+            result = {
+                'available': False,
+                'reason': 'Ant16 controller clock invalid',
+                'crio_age_seconds': None,
+                'system_age_seconds': None,
+            }
+        result['acc_age_seconds'] = acc_age
+        result['root_timestamp'] = root_timestamp
+        health['last_result'] = result
+        if result.get('available'):
+            health['last_healthy_mjd'] = now.mjd - acc_age / 86400.
+
+    #============================
+    def _auto_wind_controller_status(self, now):
+        """Return controller availability, allowing only a short grace."""
+        health = getattr(self, 'auto_wind_controller_health', None)
+        if health is None:
+            return {
+                'available': None,
+                'health_state': 'unknown',
+                'reason': 'Ant16 controller availability unknown',
+                'grace_seconds': AUTO_WIND_CONTROLLER_GRACE_SECONDS,
+                'health_age_seconds': None,
+            }
+        last_healthy = health.get('last_healthy_mjd')
+        health_age = None
+        if last_healthy is not None:
+            try:
+                health_age = (float(now.mjd) - float(last_healthy)) * 86400.
+            except (TypeError, ValueError, OverflowError):
+                health_age = None
+        if (health_age is not None and numpy.isfinite(health_age) and
+                0.0 <= health_age <= AUTO_WIND_CONTROLLER_GRACE_SECONDS):
+            if health_age <= 1.0:
+                state = 'healthy'
+                reason = 'Ant16 controller clocks fresh'
+            else:
+                state = 'grace'
+                reason = 'Ant16 controller health grace'
+            result = {
+                'available': True,
+                'health_state': state,
+                'reason': reason,
+                'grace_seconds': AUTO_WIND_CONTROLLER_GRACE_SECONDS,
+                'health_age_seconds': health_age,
+            }
+            latest = health.get('last_result')
+            if latest:
+                result.update({
+                    'crio_age_seconds': latest.get('crio_age_seconds'),
+                    'system_age_seconds': latest.get('system_age_seconds'),
+                    'acc_age_seconds': latest.get('acc_age_seconds'),
+                })
+            return result
+        if health.get('seen_frame'):
+            reason = 'Ant16 controller unavailable'
+            state = 'offline'
+        else:
+            reason = 'Ant16 controller availability unknown'
+            state = 'unknown'
+        return {
+            'available': False if state == 'offline' else None,
+            'health_state': state,
+            'reason': reason,
+            'grace_seconds': AUTO_WIND_CONTROLLER_GRACE_SECONDS,
+            'health_age_seconds': health_age,
+        }
+
+    #============================
+    def _auto_wind_telemetry(self, now, data, msg):
+        wind = self.w.get('mt2MinRollAvgWindSpeed') if self.w else None
+        sample_time = self.w.get('mtSampTime') if self.w else None
+        age = None
+        if sample_time is not None:
+            try:
+                sample = util.Time(str(sample_time).replace('/', '-'))
+                age = (now - sample).value * 86400.
+            except Exception:
+                age = None
+        scram_state = None
+        scram_comm_err = None
+        acc_age = None
+        stateframe_ok = msg == 'No Error' and data is not None
+        if stateframe_ok:
+            try:
+                root_timestamp = stateframe.extract(
+                    data, self.accini['sf']['Timestamp'])
+                acc_age = float(now.lv) - float(root_timestamp)
+                windscram = self.accini['sf']['Antenna'][15]['Frontend']['WindScram']
+                scram_state = stateframe.extract(data, windscram['State'])
+                scram_comm_err = stateframe.extract(data, windscram['CommErr'])
+            except Exception:
+                stateframe_ok = False
+        return evaluate_wind(
+            wind, age, sample_time, self.wlimit, scram_state,
+            scram_comm_err, stateframe_ok=stateframe_ok,
+            acc_age_seconds=acc_age,
+            stale_limit_seconds=AUTO_WIND_SKIP_STALE_SECONDS)
+
+    #============================
+    def _log_auto_wind_decision(self, key, decision, acq_idx, phase_idx):
+        phase_tokens = self.L.get(phase_idx)[20:].split()
+        source = phase_tokens[1] if len(phase_tokens) > 1 else ''
+        record = {
+            'decision': 'skip' if decision.get('skip') else 'execute',
+            'pair': {'acquire': self.L.get(acq_idx),
+                     'phasecal': self.L.get(phase_idx)},
+            'source': source,
+            'reason': decision.get('reason'),
+            'decision_time': util.Time.now().iso[:19],
+            'wind_mph': decision.get('wind_mph'),
+            'wind_limit_mph': decision.get('wind_limit_mph'),
+            'sample_time': decision.get('sample_time'),
+            'sample_age_seconds': decision.get('sample_age_seconds'),
+            'acc_age_seconds': decision.get('acc_age_seconds'),
+            'wind_confirmed': decision.get('wind_confirmed'),
+            'weather_available': decision.get('weather_available'),
+            'wind_reason': decision.get('wind_reason', decision.get('reason')),
+            'controller_available': decision.get('controller_available'),
+            'controller_health_state': decision.get('controller_health_state'),
+            'controller_reason': decision.get('controller_reason'),
+            'controller_health_age_seconds': decision.get(
+                'controller_health_age_seconds'),
+            'controller_grace_seconds': decision.get(
+                'controller_grace_seconds'),
+            'controller_crio_age_seconds': decision.get(
+                'controller_crio_age_seconds'),
+            'controller_system_age_seconds': decision.get(
+                'controller_system_age_seconds'),
+            'scram_reliable': decision.get('scram_reliable'),
+            'scram_state': decision.get('scram_state'),
+            'scram_comm_err': decision.get('scram_comm_err'),
+        }
+        print('AUTO_WIND_SKIP ' + json.dumps(record, sort_keys=True))
+        sys.stdout.flush()
+
+    #============================
+    def _activate_auto_wind_skip(self, key, acq_idx, phase_idx, decision):
+        self._latch_auto_wind_pair(key, acq_idx, phase_idx, decision)
+        self._log_auto_wind_decision(key, decision, acq_idx, phase_idx)
+        self.update_status()
+
+    #============================
+    def _maybe_auto_skip_current_pair(self, now, data, msg, acq_idx=None):
+        if not self.auto_wind_skip.get():
+            return False
+        if acq_idx is None:
+            acq_idx = self.curline
+        phase_idx = self._phasecal_pair_index(acq_idx)
+        if phase_idx is None or phase_idx in self.auto_wind_skip_indices:
+            return False
+        key = self._auto_wind_pair_key(phase_idx)
+        if key in self.auto_wind_decisions:
+            return False
+        if self.skip_phacal.get() and acq_idx in self.skip_phacal_indices:
+            return False
+        ant16 = self._phasecal_uses_ant16(phase_idx)
+        if ant16 is False:
+            return False
+        if ant16 is None:
+            decision = {
+                'skip': True,
+                'reason': 'phasecal Ant 16 assignment unavailable',
+                'wind_mph': None,
+                'wind_limit_mph': self.wlimit,
+                'sample_time': None,
+                'sample_age_seconds': None,
+                'scram_state': None,
+                'scram_comm_err': None,
+            }
+        else:
+            decision_now = util.Time.now()
+            controller = self._auto_wind_controller_status(decision_now)
+            decision = self._auto_wind_telemetry(now, data, msg)
+            decision['wind_reason'] = decision.get('reason')
+            decision['controller_available'] = controller.get('available')
+            decision['controller_health_state'] = controller.get(
+                'health_state')
+            decision['controller_reason'] = controller.get('reason')
+            decision['controller_health_age_seconds'] = controller.get(
+                'health_age_seconds')
+            decision['controller_grace_seconds'] = controller.get(
+                'grace_seconds')
+            decision['controller_crio_age_seconds'] = controller.get(
+                'crio_age_seconds')
+            decision['controller_system_age_seconds'] = controller.get(
+                'system_age_seconds')
+            if controller.get('available') is not True:
+                decision['skip'] = True
+                decision['reason'] = controller.get('reason')
+        self.auto_wind_decisions[key] = decision
+        if not decision.get('skip'):
+            self._log_auto_wind_decision(key, decision, acq_idx, phase_idx)
+            return False
+        self._activate_auto_wind_skip(key, acq_idx, phase_idx, decision)
+        return True
+
+    #============================
+    def _auto_wind_recovery_candidate(self, now):
+        """Return (acquire, phasecal, sun, following) for active daytime cal."""
+        if not self.auto_wind_skip.get():
+            return None
+        if self.curline >= self.lastline:
+            return None
+        try:
+            current_tokens = self.L.get(self.curline)[20:].split()
+        except TclError:
+            return None
+        if not current_tokens:
+            return None
+        command = current_tokens[0].upper()
+        if command == 'ACQUIRE':
+            acq_idx = self.curline
+            phase_idx = self._phasecal_pair_index(acq_idx)
+        elif command == 'PHASECAL':
+            phase_idx = self.curline
+            acq_idx = phase_idx - 1
+            try:
+                acq_tokens = self.L.get(acq_idx)[20:].split()
+            except TclError:
+                acq_tokens = []
+            if (acq_idx < 0 or not acq_tokens or
+                    acq_tokens[0].upper() != 'ACQUIRE' or
+                    not self._is_midday_phacal(phase_idx)):
+                return None
+        else:
+            return None
+        if phase_idx is None or self._phasecal_uses_ant16(phase_idx) is not True:
+            return None
+        sun_idx = phase_idx + 1
+        while sun_idx < self.lastline and not self.L.get(sun_idx)[20:].split():
+            sun_idx += 1
+        if sun_idx >= self.lastline:
+            return None
+        sun_command = self.L.get(sun_idx)[20:].split()[0].upper()
+        if sun_command not in ('SUN', 'SUN_NO_ANT3'):
+            return None
+        following_idx = sun_idx + 1
+        while (following_idx < self.lastline and
+               not self.L.get(following_idx)[20:].split()):
+            following_idx += 1
+        if (following_idx >= self.lastline or
+                now.mjd >= mjd(self.L.get(following_idx))):
+            return None
+        return acq_idx, phase_idx, sun_idx, following_idx
+
+    #============================
+    def _latch_auto_wind_pair(self, key, acq_idx, phase_idx, decision):
+        self.auto_wind_skip_indices.update((acq_idx, phase_idx))
+        self.auto_wind_decisions[key] = decision
+        for idx in (acq_idx, phase_idx):
+            self._mark_line_skipped(idx)
+
+    #============================
+    def _log_auto_wind_recovery(self, key, decision, acq_idx, phase_idx,
+                                sun_idx, original_sun_time, actual_start):
+        record = {
+            'event': 'recovery_initiated',
+            'pair': {'acquire': self.L.get(acq_idx),
+                     'phasecal': self.L.get(phase_idx)},
+            'sun': self.L.get(sun_idx),
+            'original_sun_time': original_sun_time,
+            'actual_start': actual_start,
+            'reason': decision.get('reason'),
+            'wind_mph': decision.get('wind_mph'),
+            'wind_limit_mph': decision.get('wind_limit_mph'),
+            'sample_time': decision.get('sample_time'),
+            'sample_age_seconds': decision.get('sample_age_seconds'),
+            'acc_age_seconds': decision.get('acc_age_seconds'),
+            'wind_confirmed': decision.get('wind_confirmed'),
+            'weather_available': decision.get('weather_available'),
+            'wind_reason': decision.get('wind_reason', decision.get('reason')),
+            'controller_available': decision.get('controller_available'),
+            'controller_health_state': decision.get('controller_health_state'),
+            'controller_reason': decision.get('controller_reason'),
+            'controller_health_age_seconds': decision.get(
+                'controller_health_age_seconds'),
+            'controller_grace_seconds': decision.get(
+                'controller_grace_seconds'),
+            'controller_crio_age_seconds': decision.get(
+                'controller_crio_age_seconds'),
+            'controller_system_age_seconds': decision.get(
+                'controller_system_age_seconds'),
+            'scram_reliable': decision.get('scram_reliable'),
+            'scram_state': decision.get('scram_state'),
+            'scram_comm_err': decision.get('scram_comm_err'),
+        }
+        print('AUTO_WIND_RECOVERY ' + json.dumps(record, sort_keys=True))
+        sys.stdout.flush()
+
+    #============================
+    def _maybe_recover_active_pair(self, data, msg):
+        """Abort a confirmed-unsafe active pair and initiate its next SUN."""
+        if self.status.get(self.curline) != 'Running...':
+            return False
+        now = util.Time.now()
+        candidate = self._auto_wind_recovery_candidate(now)
+        if candidate is None:
+            return False
+        acq_idx, phase_idx, sun_idx, following_idx = candidate
+        decision = self._auto_wind_telemetry(now, data, msg)
+        if not decision.get('wind_confirmed'):
+            return False
+        key = self._auto_wind_pair_key(phase_idx)
+        decision['skip'] = True
+        decision['recovery'] = True
+        self._latch_auto_wind_pair(key, acq_idx, phase_idx, decision)
+        for idx in (acq_idx, phase_idx):
+            self.L.itemconfig(idx, background='light gray')
+        self.waitmode = False
+        self.nextctlline = 0
+        self.wait = 0
+        if (self.PAthread is not None and
+                self.PAthread.is_alive()):
+            self.execute_ctlline('$PA-EXIT')
+        sun_line = self.L.get(sun_idx)
+        self.auto_wind_recovery[sun_line] = {
+            'mjd1': now.mjd,
+        }
+        original_sun_time = sun_line[:19]
+        self._log_auto_wind_recovery(
+            key, decision, acq_idx, phase_idx, sun_idx,
+            original_sun_time, now.iso[:19])
+        self.curline = sun_idx
+        self.status.delete(self.curline)
+        self.status.insert(self.curline, 'Running...')
+        self.L.itemconfig(self.curline, background='orange')
+        self.L.see(min(self.curline+5, END))
+        self.status.see(min(self.curline+5, END))
+        self.execute_cmds()
+        return True
 
     #============================
     def _update_skip_phacal_indices(self):
@@ -1291,17 +1919,21 @@ class App():
                 except TclError:
                     pass
         self.skip_phacal_indices = new_indices
+        self._refresh_auto_wind_skip_indices()
         self._apply_skip_phacal_styling()
 
     #============================
     def _apply_skip_phacal_styling(self):
         if not hasattr(self, 'L'):
             return
-        for idx in self.skip_phacal_indices:
+        indices = set(self.auto_wind_skip_indices)
+        indices.update(self.skip_phacal_indices)
+        for idx in indices:
             if idx >= self.L.size():
                 continue
             try:
-                if self.skip_phacal.get():
+                if (idx in self.auto_wind_skip_indices or
+                        self.skip_phacal.get()):
                     if self.L.itemcget(idx, 'background') != 'orange':
                         self.L.itemconfig(idx, background='light gray')
                 else:
@@ -1315,8 +1947,10 @@ class App():
         if idx >= getattr(self, 'lastline', 0):
             return
         recorded = False
-        if self.skip_phacal.get() and idx in self.skip_phacal_indices:
-            if mjd(self.L.get(idx)) <= mjd():
+        if ((self.skip_phacal.get() and idx in self.skip_phacal_indices) or
+                idx in self.auto_wind_skip_indices):
+            if (idx in self.auto_wind_skip_indices or
+                    mjd(self.L.get(idx)) <= mjd()):
                 recorded = idx not in self.executed_skip_phacal_indices
                 self._record_skip_phacal_line(idx)
         if idx < self.status.size():
@@ -1338,10 +1972,9 @@ class App():
     #============================
     def _next_active_index(self, idx, mark=True):
         next_idx = idx + 1
-        if not self.skip_phacal.get():
-            return next_idx
+        indices = self._active_skip_indices()
         while next_idx < getattr(self, 'lastline', 0):
-            if next_idx in self.skip_phacal_indices:
+            if next_idx in indices:
                 if mark:
                     self._mark_line_skipped(next_idx)
                 next_idx += 1
@@ -1351,12 +1984,30 @@ class App():
 
     #============================
     def _ensure_current_line_valid(self):
-        if not self.skip_phacal.get() or not hasattr(self, 'curline'):
+        if not hasattr(self, 'curline'):
             return
+        indices = self._active_skip_indices()
         total = getattr(self, 'lastline', 0)
-        while self.curline < total and self.curline in self.skip_phacal_indices:
+        advanced = False
+        while self.curline < total and self.curline in indices:
             self._mark_line_skipped(self.curline)
             self.curline += 1
+            advanced = True
+        if advanced and self.curline < total:
+            try:
+                status = self.status.get(self.curline)
+                if status in ('', 'Skipped'):
+                    self.status.delete(self.curline)
+                    if (self.L.get(self.curline) in
+                            getattr(self, 'auto_wind_recovery', {})):
+                        self.status.insert(self.curline, 'Started...')
+                    elif mjd(self.L.get(self.curline)) <= mjd():
+                        self.status.insert(self.curline, 'Started...')
+                    else:
+                        self.status.insert(self.curline, 'Waiting...')
+            except TclError:
+                pass
+            self.update_status()
 
     #============================
     def connect2roach(self):
@@ -1565,6 +2216,7 @@ class App():
         self.curline = 0
         self.status.configure( state = DISABLED)
         self._clear_skip_phacal_state()
+        self._clear_auto_wind_recovery_state()
         self.update_status()
 
     #============================
@@ -1580,6 +2232,8 @@ class App():
         self.waitmode = False
         self.nextctlline = 0
         self.wait = 0
+        self._clear_auto_wind_skip_state()
+        self._clear_auto_wind_recovery_state()
         self.status.configure(state = NORMAL)
         if filename is None:
             init_dir = os.getcwd()
@@ -1658,6 +2312,8 @@ class App():
         self.wait = 0
         self.status.configure( state = NORMAL)
         t = util.Time.now()
+        self._clear_auto_wind_skip_state()
+        self._clear_auto_wind_recovery_state()
         enable_ant13_fem_power = self.subarray_name == 'Subarray1'
         scd = make_sched(t=t,
                          ant13_fem_power=enable_ant13_fem_power)
@@ -1700,6 +2356,7 @@ class App():
 
     #============================
     def adjust_selection(self,sel,delt):
+        self._clear_auto_wind_recovery_state()
         if len(sel) == 0:
             sel = range(self.lastline)
         d = util.datime()
@@ -1769,6 +2426,8 @@ class App():
             self.New()
             return
         else:
+            self._clear_auto_wind_recovery_state()
+            self._clear_auto_wind_skip_state()
             self._clear_skip_phacal_state()
             # Determine how many days from date of first line to today
             line = self.L.get(0)
@@ -1788,6 +2447,7 @@ class App():
 
     #============================
     def autogen(self,t):
+        self._clear_auto_wind_recovery_state()
         # Auto-generate the standard solar schedule
         # Determine sunrise, sunset times for this day
         mjdrise, mjdset = suntimes(t)
@@ -1930,6 +2590,7 @@ class App():
         self.status.configure( state = NORMAL )
         sel = map(int, self.L.curselection())
         if len(sel) == 1:
+            self._clear_auto_wind_recovery_state()
             index = sel[0]
             self.content = self.E1.get().upper()
             if self.content:
@@ -2004,13 +2665,11 @@ class App():
                 self.status.delete(self.curline)
                 self.status.insert(self.curline,'Started...')
 
-            if self.skip_phacal.get():
+            if self._active_skip_indices():
                 old_cur = self.curline
                 self._ensure_current_line_valid()
                 self._apply_skip_phacal_styling()
                 if self.curline != old_cur and self.curline < self.lastline:
-                    self.status.delete(self.curline)
-                    self.status.insert(self.curline,'Started...')
                     self.L.itemconfig(self.curline,background="orange")
 
             # Find the file associated with the Macro command on the current 
@@ -2270,6 +2929,80 @@ class App():
         return True
 
     #============================
+    def _start_due_line(self, now, data, msg):
+        """Start the current due line, allowing an automatic pair skip."""
+        now = mjd()
+        line = self.L.get(self.curline)
+        status = self.status.get(self.curline)
+        if not ((mjd(line) <= now and status == 'Waiting...') or
+                status == 'Started...'):
+            return False
+        # ``t`` at the top of inc_time() predates the stateframe read.  Use a
+        # fresh clock for the telemetry age so a newly read ACC root timestamp
+        # cannot appear to be from the future.
+        decision_now = util.Time.now()
+        if self._maybe_auto_skip_current_pair(decision_now, data, msg):
+            return True
+        self.status.delete(self.curline)
+        self.status.insert(self.curline, 'Running...')
+        prev_idx = self.curline-1
+        if prev_idx >= 0:
+            if prev_idx in self._active_skip_indices():
+                self.L.itemconfig(prev_idx, background="light gray")
+            else:
+                self.L.itemconfig(prev_idx, background="white")
+        self.L.itemconfig(self.curline, background="orange")
+        self.L.see(min(self.curline+5,END))
+        self.status.see(min(self.curline+5,END))
+        self.execute_cmds()
+        return True
+
+    #============================
+    def _advance_running_line(self, now, data, msg):
+        """Advance a running line when its next non-skipped line is due."""
+        now = mjd()
+        raw_next_idx = self.curline + 1
+        if raw_next_idx >= self.lastline:
+            return False
+        raw_nextline = self.L.get(raw_next_idx)
+        if mjd(raw_nextline) > now:
+            return False
+        # Evaluate the raw ACQUIRE immediately before changing the current
+        # line.  A skipped pair must leave the active SUN running until the
+        # next non-skipped SUN is actually due.
+        decision_now = util.Time.now()
+        if self._maybe_auto_skip_current_pair(decision_now, data, msg,
+                                               raw_next_idx):
+            return True
+        next_idx = self._next_active_index(self.curline)
+        if next_idx < self.lastline:
+            nextline = self.L.get(next_idx)
+        else:
+            nextline = None
+        if nextline and mjd(nextline) <= mjd():
+            self.status.delete(self.curline)
+            self.status.insert(self.curline, 'Done')
+            prev_cur = self.curline
+            previous_line = self.L.get(prev_cur)
+            if previous_line in getattr(self, 'auto_wind_recovery', {}):
+                del self.auto_wind_recovery[previous_line]
+            self.curline = next_idx
+            if self.curline < self.lastline:
+                self.status.delete(self.curline)
+                self.status.insert(self.curline, 'Running...')
+                if prev_cur in self._active_skip_indices():
+                    self.L.itemconfig(prev_cur,background="light gray")
+                else:
+                    self.L.itemconfig(prev_cur,background="white")
+                self.L.itemconfig(self.curline,background="orange")
+                self.L.see(min(self.curline+5,END))
+                self.status.see(min(self.curline+5,END))
+            if self.curline < self.lastline:
+                self.execute_cmds()
+            return True
+        return False
+
+    #============================
     def inc_time(self):
         global sf_dict, sh_dict
 
@@ -2482,6 +3215,7 @@ class App():
 
         self._update_ant13_subarray_assignment(data, msg)
         self._check_ant13_fem_readiness(data, msg)
+        self._update_auto_wind_controller_health(util.Time.now(), data, msg)
                 
         # ************ This block commented out due to loss of SQL **************
         # If we are connected to the SQL database, send converted stateframe (only master schedule is connected)
@@ -2554,33 +3288,18 @@ class App():
         if self.Toggle == 0:
             # Schedule is in the GO state.
             # First check if the current line needs to be started or stopped
-            if self.skip_phacal.get():
-                self._apply_skip_phacal_styling()
-                self._ensure_current_line_valid()
+            self._apply_skip_phacal_styling()
+            self._ensure_current_line_valid()
             line = self.L.get(self.curline)
             status = self.status.get(self.curline)
             now = mjd()
             if (mjd(line) <= now and status == 'Waiting...') or status == 'Started...':
-                # This line has not been started, so do so now
-                self.status.delete(self.curline)
-                self.status.insert(self.curline,'Running...')
-                prev_idx = self.curline-1
-                if prev_idx >= 0:
-                    if self.skip_phacal.get() and prev_idx in self.skip_phacal_indices:
-                        self.L.itemconfig(prev_idx,background="light gray")
-                    else:
-                        self.L.itemconfig(prev_idx,background="white")
-                self.L.itemconfig(self.curline,background="orange")
-                self.L.see(min(self.curline+5,END))
-                self.status.see(min(self.curline+5,END))
-                #******
-                # Change to spawn this task as non-blocking function
-                # but make sure it returns, or there is some semaphore
-                # behavior with error checking
-                self.execute_cmds()
-                #t1 = FuncThread(execute_cmds,self)
+                self._start_due_line(now, data, msg)
             elif status == 'Running...':
-                if self.waitmode:
+                recovered = self._maybe_recover_active_pair(data, msg)
+                if recovered:
+                    pass
+                elif self.waitmode:
                     # If $WAIT is currently in force, decrement self.wait
                     # When self.wait = 0, continue executing commands starting with
                     # line self.nextctlline, which should be line following $WAIT
@@ -2589,34 +3308,8 @@ class App():
                     sys.stdout.flush()
                     if self.wait == 0:
                         self.execute_cmds()
-                next_idx = self._next_active_index(self.curline)
-                if next_idx < self.lastline:
-                    nextline = self.L.get(next_idx)
-                else:
-                    nextline = None
-                if nextline and mjd(nextline) <= now:
-                    # Next line should be running
-                    self.status.delete(self.curline)
-                    self.status.insert(self.curline,'Done')
-                    prev_cur = self.curline
-                    self.curline = next_idx
-                    if self.curline < self.lastline:
-                        self.status.delete(self.curline)
-                        self.status.insert(self.curline,'Running...')
-                        if self.skip_phacal.get() and prev_cur in self.skip_phacal_indices:
-                            self.L.itemconfig(prev_cur,background="light gray")
-                        else:
-                            self.L.itemconfig(prev_cur,background="white")
-                        self.L.itemconfig(self.curline,background="orange")
-                        self.L.see(min(self.curline+5,END))
-                        self.status.see(min(self.curline+5,END))
-                    #******
-                    # Change to spawn this task as non-blocking function
-                    # but make sure it returns, or there is some semaphore
-                    # behavior with error checking
-                    if self.curline < self.lastline:
-                        self.execute_cmds()
-                    #t1 = FuncThread(execute_cmds,self)
+                if not recovered:
+                    self._advance_running_line(now, data, msg)
         self.status.configure(state=DISABLED)
         # Debug info, simply logs that we have exited this procedure
         #sys.stdout.write('-')
@@ -2818,8 +3511,15 @@ class App():
         global sf_dict, sh_dict
         # Update the status file in /common/webplots for display on the status web page
         self.update_status()
-        # Get time range of this Macro command
-        mjd1 = mjd(self.L.get(self.curline))
+        # Get time range of this Macro command.  A recovery SUN keeps this
+        # override until advancing to another row, including $WAIT resumes
+        # and Stop/Go, so its track table includes the early recovery time.
+        current_line = self.L.get(self.curline)
+        recovery_override = self._recovery_override()
+        if recovery_override is None:
+            mjd1 = mjd(current_line)
+        else:
+            mjd1 = recovery_override['mjd1']
         next_idx = self._next_active_index(self.curline, mark=False)
         if self.lastline <= 0 or next_idx >= self.lastline:
             mjd2 = mjd1
@@ -3082,6 +3782,14 @@ class App():
         elif ctlline[0] == '#':
             pass
         else:
+            subarray_antlist = None
+            if ctlline.split()[0].upper() == '$SUBARRAY':
+                try:
+                    subarray_antlist = resolve_subarray_args(ctlline.split()[1:])
+                except ValueError as exc:
+                    self.error = str(exc)
+                    print(self.error)
+                    return
             if ctlline.strip().upper() == 'DCMAUTO-ON':
                 self.sendctlline('DCMTABLE DCM.TXT')
             self.sendctlline(ctlline)
@@ -3707,24 +4415,7 @@ class App():
                     # run the SUBARRRAY1 command if this is the master schedule,
                     # otherwise run the SUBARRAY2 command
                     print('$SUBARRAY line is:',ctlline)
-                    if ctlline.find('.antlist') == -1:
-                        # there is no .antlist file in this line --> the antlist
-                        # should be directly specified in the line, e.g.:
-                        # $SUBARRAY ant1 ant7-8,ant10
-                        l = len('$SUBARRAY ')
-                        antlist = ctlline[l:]
-                    else:
-                        # a .antlist file is specified --> read antlist from
-                        # the specified .antlist file
-                        antlistfile = ctlline.split()[1]
-                        try:
-                            antlistname = ctlline.split()[2]
-                            antlist = get_antlist(antlistname,antlistfile)
-                        except:
-                            antlist = ''
-                        if antlist == '':
-                            self.error = '$SUBARRAY: antlist name not in ' + antlistfile
-                            return
+                    antlist = subarray_antlist
                     if self.subarray_name == 'Subarray1':
                         N = 1
                     else:

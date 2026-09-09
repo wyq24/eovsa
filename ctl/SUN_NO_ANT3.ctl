@@ -4,10 +4,10 @@ FLUSH ant16
 FSEQ-OFF
 FSEQ-INIT
 DCMAUTO-OFF
-$SUBARRAY default.antlist sun
+$SUBARRAY default.antlist sun exclude ant3
 $MK_TABLES sun_tab Sun
-TRACKTABLE sun_tab.radec ant1-2 ant4-15
-TRACK ant1-2 ant4-15
+TRACKTABLE sun_tab.radec ant1-15
+TRACK ant1-15
 FSEQ-FILE solar.fsq
 FSEQ-ON
 STOW ant3
