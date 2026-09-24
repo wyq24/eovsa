@@ -1,11 +1,10 @@
 """
-Lightweight helpers to replace measured FEM power values with modeled
+Lightweight helpers to replace measured FEM power values with antenna-specific
 attenuation->power predictions when they exceed a threshold.
 
-Coefficient placeholders are embedded so this module can be used without
-reading files. Coefficients are first-order: Power(dBm) = c1*attn_total + c0.
-Slopes (c1) are fixed per pol/ND; intercepts (c0) vary by env tag: lab
-(default), sun, sky.
+Coefficients are embedded so this module can be used without reading files.
+They are first-order: Power(dBm) = c1*attn_total + c0. Antennas without a
+calibration pass measured power through unchanged.
 """
 
 import numpy as np
@@ -15,28 +14,37 @@ try:
 except NameError:
     string_types = (str,)
 
-# Placeholder first-order polynomial coefficients.
+# First-order polynomial coefficients keyed by one-based antenna number.
 # Model: Power(dBm) = c1 * attn_total + c0
 # c1 (slope) is fixed per pol/ND; c0 (intercept) depends on env tag: "lab",
 # "sun", or "sky".
+# Add Ant14 only after its field calibration has been reviewed.
 COEFF_SLOPE = {
-    "H": {"OFF": -1.0177794117647057, "ON": -1.0048897058823532},
-    "V": {"OFF": -1.0404926470588238, "ON": -1.0209411764705887},
+    15: {
+        "H": {"OFF": -1.0177794117647057, "ON": -1.0048897058823532},
+        "V": {"OFF": -1.0404926470588238, "ON": -1.0209411764705887},
+    },
 }
 
 COEFF_INTERCEPT = {
-    "lab": {
-        "H": {"OFF": 9.843970588235292, "ON": 14.109485294117649},
-        "V": {"OFF": 10.154007352941177, "ON": 14.060808823529415},
+    15: {
+        "lab": {
+            "H": {"OFF": 9.843970588235292, "ON": 14.109485294117649},
+            "V": {"OFF": 10.154007352941177, "ON": 14.060808823529415},
+        },
+        "sun": {
+            "H": {"OFF": 0.0, "ON": 0.0},
+            "V": {"OFF": 0.0, "ON": 0.0},
+        },
+        "sky": {
+            "H": {"OFF": 0.0, "ON": 0.0},
+            "V": {"OFF": 0.0, "ON": 0.0},
+        },
     },
-    "sun": {
-        "H": {"OFF": 0.0, "ON": 0.0},
-        "V": {"OFF": 0.0, "ON": 0.0},
-    },
-    "sky": {
-        "H": {"OFF": 0.0, "ON": 0.0},
-        "V": {"OFF": 0.0, "ON": 0.0},
-    },
+}
+
+VOLTAGE_THRESHOLD = {
+    15: {"H": 1.105, "V": 1.105},
 }
 
 
@@ -70,7 +78,17 @@ def _normalize_env(env):
     raise ValueError("env must be one of: lab, sun, sky")
 
 
-def predict_power_from_attn(attn1, attn2, pol, nd_state, env="lab"):
+def get_voltage_threshold(antenna, pol):
+    """Return the calibrated voltage threshold, or None when unavailable."""
+    try:
+        antenna_key = int(antenna)
+    except (TypeError, ValueError):
+        return None
+    pol_key = _normalize_pol(pol)
+    return VOLTAGE_THRESHOLD.get(antenna_key, {}).get(pol_key)
+
+
+def predict_power_from_attn(attn1, attn2, pol, nd_state, env="lab", antenna=15):
     """
     Predict FEM power (dBm) from attenuation settings and ND state.
 
@@ -82,17 +100,22 @@ def predict_power_from_attn(attn1, attn2, pol, nd_state, env="lab"):
     nd_state : 0/1 or "OFF"/"ON"
     env : {"lab","sun","sky"}
         Select intercept set; slope remains fixed per pol/ND.
+    antenna : int
+        One-based antenna number with an available calibration.
     """
     pol_key = _normalize_pol(pol)
     nd_key = _normalize_nd(nd_state)
     env_key = _normalize_env(env)
-    c1 = COEFF_SLOPE[pol_key][nd_key]
-    c0 = COEFF_INTERCEPT[env_key][pol_key][nd_key]
+    antenna_key = int(antenna)
+    c1 = COEFF_SLOPE[antenna_key][pol_key][nd_key]
+    c0 = COEFF_INTERCEPT[antenna_key][env_key][pol_key][nd_key]
     attn_total = float(attn1) + float(attn2)
     return float(c1 * attn_total + c0)
 
 
-def replace_power_if_needed(measured_dbm, attn1, attn2, pol, nd_state, threshold_value, env="lab", measured_voltage=None):
+def replace_power_if_needed(measured_dbm, attn1, attn2, pol, nd_state,
+                            threshold_value=None, env="lab",
+                            measured_voltage=None, antenna=15):
     """
     Replace measured power with modeled power if a measured value exceeds a threshold.
 
@@ -122,8 +145,26 @@ def replace_power_if_needed(measured_dbm, attn1, attn2, pol, nd_state, threshold
     except (TypeError, ValueError):
         return measured_dbm, False
 
+    if threshold_value is None:
+        try:
+            threshold_value = get_voltage_threshold(antenna, pol)
+        except ValueError:
+            return measured_dbm, False
+    if threshold_value is None:
+        return measured_dbm, False
+
+    try:
+        threshold_value = float(threshold_value)
+    except (TypeError, ValueError):
+        return measured_dbm, False
+
     if np.isnan(compare_value) or compare_value <= threshold_value:
         return measured_dbm, False
 
-    modeled = predict_power_from_attn(attn1, attn2, pol, nd_state, env=env)
+    try:
+        modeled = predict_power_from_attn(
+            attn1, attn2, pol, nd_state, env=env, antenna=antenna
+        )
+    except (KeyError, TypeError, ValueError):
+        return measured_dbm, False
     return modeled, True
