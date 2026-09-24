@@ -1,3 +1,6 @@
+import csv
+import os
+import tempfile
 import unittest
 
 import numpy as np
@@ -6,6 +9,43 @@ import attn_power_model as model
 
 
 class AttnPowerModelTest(unittest.TestCase):
+
+    def _write_fieldtest_csv(self):
+        output = tempfile.NamedTemporaryFile(mode="w", delete=False)
+        writer = csv.writer(output)
+        writer.writerow([
+            "utc", "nd",
+            "h_attn1", "h_attn2", "h_voltage", "h_power",
+            "v_attn1", "v_attn2", "v_voltage", "v_power",
+        ])
+        for nd_state in (0, 1):
+            for attenuation in (1, 2, 3):
+                writer.writerow([
+                    "test", nd_state,
+                    attenuation, 0, 0.5,
+                    -2.0 * attenuation + 10.0 + nd_state,
+                    attenuation, 0, 0.6,
+                    -3.0 * attenuation + 20.0 + nd_state,
+                ])
+        output.close()
+        return output.name
+
+    def test_fit_fieldtest_csv_and_format_assignments(self):
+        filename = self._write_fieldtest_csv()
+        try:
+            fits = model.fit_fieldtest_csv(filename)
+        finally:
+            os.unlink(filename)
+
+        self.assertAlmostEqual(fits["H"]["OFF"]["slope"], -2.0)
+        self.assertAlmostEqual(fits["H"]["ON"]["intercept"], 11.0)
+        self.assertAlmostEqual(fits["V"]["OFF"]["slope"], -3.0)
+        self.assertEqual(fits["V"]["ON"]["points_used"], 3)
+
+        formatted = model.format_calibration_assignments(14, fits)
+        self.assertIn("COEFF_SLOPE[14]", formatted)
+        self.assertIn("COEFF_INTERCEPT[14]", formatted)
+        self.assertIn("VOLTAGE_THRESHOLD[14]", formatted)
 
     def test_ant15_prediction_preserves_existing_coefficients(self):
         value = model.predict_power_from_attn(

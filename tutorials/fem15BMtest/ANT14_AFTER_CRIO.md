@@ -46,61 +46,16 @@ FEM14SAFE
 ## 4. Fit the Ant14 model
 
 Run this after the test. The default voltage window removes the low voltage
-floor and stays below saturation. Change `VMIN` or `VMAX` if the test plot show
-a different valid range.
+floor and stays below saturation.
 
 ```bash
-python - <<'PY'
-import csv
-import numpy as np
-
-CSV_FILE = "/tmp/fem14_fieldtest.csv"
-VMIN = 0.05
-VMAX = 1.05
-
-with open(CSV_FILE, "r") as input_file:
-    rows = list(csv.DictReader(input_file))
-
-fits = {}
-for pol in ("h", "v"):
-    for nd_state in (0, 1):
-        attenuation = []
-        power = []
-        for row in rows:
-            raw_nd = str(row["nd"]).strip().lower()
-            row_nd = 1 if raw_nd in ("1", "true", "on") else 0
-            voltage = float(row[pol + "_voltage"])
-            measured_power = float(row[pol + "_power"])
-            if row_nd != nd_state:
-                continue
-            if not np.isfinite(voltage) or not np.isfinite(measured_power):
-                continue
-            if not VMIN < voltage <= VMAX:
-                continue
-            total_attn = float(row[pol + "_attn1"]) + float(row[pol + "_attn2"])
-            attenuation.append(total_attn)
-            power.append(measured_power)
-
-        if len(attenuation) < 3:
-            raise RuntimeError("Not enough valid %s ND=%d rows" % (pol, nd_state))
-        slope, intercept = np.polyfit(attenuation, power, 1)
-        fits[(pol.upper(), nd_state)] = (float(slope), float(intercept))
-
-print("COEFF_SLOPE[14] = {")
-for pol in ("H", "V"):
-    print('    "%s": {"OFF": %.12g, "ON": %.12g},' % (
-        pol, fits[(pol, 0)][0], fits[(pol, 1)][0]))
-print("}")
-print("COEFF_INTERCEPT[14] = {")
-print('    "lab": {')
-for pol in ("H", "V"):
-    print('        "%s": {"OFF": %.12g, "ON": %.12g},' % (
-        pol, fits[(pol, 0)][1], fits[(pol, 1)][1]))
-print("    },")
-print("}")
-print('VOLTAGE_THRESHOLD[14] = {"H": 1.105, "V": 1.105}')
-PY
+python attn_power_model.py \
+  --fit-fieldtest /tmp/fem14_fieldtest.csv \
+  --antenna 14
 ```
+
+If the test plot show a different valid voltage range, add
+`--voltage-min VALUE --voltage-max VALUE`.
 
 Copy the printed block below the constant definitions in
 `attn_power_model.py`:
