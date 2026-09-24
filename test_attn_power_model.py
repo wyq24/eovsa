@@ -39,12 +39,29 @@ class AttnPowerModelTest(unittest.TestCase):
         self.assertFalse(replaced)
         self.assertEqual(value, -3.5)
 
-    def test_uncalibrated_antenna_passes_through(self):
-        value, replaced = model.replace_power_if_needed(
-            -2.0, 0, 0, "H", 0, measured_voltage=1.2, antenna=14
+    def test_ant14_calibration_is_absent_or_complete(self):
+        configured = (
+            14 in model.COEFF_SLOPE,
+            14 in model.COEFF_INTERCEPT,
+            14 in model.VOLTAGE_THRESHOLD,
         )
-        self.assertFalse(replaced)
-        self.assertEqual(value, -2.0)
+        self.assertTrue(all(configured) or not any(configured))
+
+        if not any(configured):
+            value, replaced = model.replace_power_if_needed(
+                -2.0, 0, 0, "H", 0, measured_voltage=1.2, antenna=14
+            )
+            self.assertFalse(replaced)
+            self.assertEqual(value, -2.0)
+            return
+
+        for pol in ("H", "V"):
+            self.assertIn(pol, model.VOLTAGE_THRESHOLD[14])
+            for nd_state in ("OFF", "ON"):
+                self.assertIn(nd_state, model.COEFF_SLOPE[14][pol])
+                self.assertIn(
+                    nd_state, model.COEFF_INTERCEPT[14]["lab"][pol]
+                )
 
     def test_nan_power_passes_through(self):
         value, replaced = model.replace_power_if_needed(

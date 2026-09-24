@@ -7,6 +7,8 @@ or return an antenna to observing mode.
 
 ## Files
 
+- `ANT14_AFTER_CRIO.md`: short end-to-end Ant14 instructions after loading the
+  detector coefficients into the cRIO.
 - `FEM14FIELDTEST.ctl`: Ant14-only ND/attenuator sweep (about 4 minutes).
 - `FEM14SAFE.ctl`: Ant14-only conservative hold state for an abort.
 - `FEM14FIELDTEST.scd.template`: one Ant14 scheduler entry.
