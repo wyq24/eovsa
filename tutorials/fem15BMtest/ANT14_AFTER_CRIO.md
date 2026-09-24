@@ -5,7 +5,7 @@
 ```bash
 cd /home/sched/Dropbox/PythonCode/Current
 git fetch origin
-git checkout agent/ant14-fem-display-support
+git checkout ant14-fem-display-support
 git pull --ff-only
 ```
 
